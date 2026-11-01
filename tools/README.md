@@ -12,6 +12,7 @@
 | 工具 | 回答什么问题 | 典型命令 |
 | --- | --- | --- |
 | `profile_check.py` | 档案数值是否自洽、经验 R0 是否合理 | `python tools/profile_check.py --profile covid19` |
+| `contact_probe.py` | **每人每帧的空间邻近数 C**（接触率），改城市结构后复测 | `python tools/contact_probe.py --profile covid19 --population 10000 --frames 480` |
 | `bench.py` | 单世界延迟/绘制/显存 + **平均帧率与 1% low**（`update` 含 sync，`draw` 为最坏口径） | `python tools/bench.py --profile covid19 --population 100000 --json benchmarks/b.json` |
 | `ab_iter.py` | **A/B 改动是否真的更快**（两进程交替，抗漂移） | `python tools/ab_iter.py --before _base/simple_disease_simulation.py --profile covid19 --json benchmarks/ab.json` |
 | `diag.py` | 瓶颈是 CPU 派发还是 GPU 算力 | `python tools/diag.py covid19 10000 42` |
@@ -86,6 +87,17 @@
   `--empirical` 路径：从模拟轨迹反推增长率并折算 R0，容差 30%。
 - 它**不感知 v3/v4 机制**（只做宏观量自洽），所以 PASS 不等于机制正确。
 
+### `contact_probe.py`（接触率）
+
+- 直接测量"每人每帧平均空间邻近人数" C（`status != 4` 视为活体，半径 =
+  `INFECT_RADIUS`），并按时段（夜间 01–04、工作时段 09–17）与所在地点
+  （home/work/school/leisure/transit）分段给出。用 GPU `torch.cdist` 分块，按显存
+  自适应 chunk，1M 人口也能跑。
+- 为什么要它：`CONTACT_RATE_PER_FRAME = 24.6` 是派生病历参数的标定常量，城市结构
+  （城区数/邻里人口/单位规模/场馆密度）一变，C 就变，R0 跟着变。**改城市结构后
+  必须用它复测**：10k 基准 ≈23.0，100k ≈25.4，1M ≈28.3（见 SCALING.md §3）。
+- `--warmup` 跳过初始化瞬态，`--stride` 抽帧降成本；`--json` 存明细。
+
 ### `gpu_util.py`
 
 - 纯 update 循环 + 外部采样，用于说明"单进程吃不满 GPU"是 launch 受限。
@@ -93,6 +105,7 @@
 ## 产物位置
 
 所有 JSON/CSV/PNG 都写在 `benchmarks/`：`bench_*.json`、`ab_*.json`、`sweep_*.json`、
-`ensemble_*.{json,csv,png}`、`diag_*.json`、`phase_*.json`、`golden_*.json`（历史快照）。
+`ensemble_*.{json,csv,png}`、`diag_*.json`、`phase_*.json`、`contact_*.json`、
+`golden_*.json`（历史快照）。
 命名约定：`<类型>_<主题>_<profile>_<population>.json`，文档里引用文件名而不是口头数字。
 `benchmarks/` 被 `.gitignore` 忽略（可反复生成，不入库）。

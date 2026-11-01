@@ -238,7 +238,7 @@ v4 = v3 + 两个可选顶层块（`heterogeneity`、`mixing`），语义与实�
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
-| `contact_rate_per_frame` | `24.6` | 10k 基准下每帧有效接触数（活动模型实测校准；是 `CONTACT_RATE_PER_FRAME` 常量） |
+| `contact_rate_per_frame` | `24.6` | 10k 基准下每帧有效接触数（活动模型实测校准；是 `CONTACT_RATE_PER_FRAME` 常量）。**只影响 R0→p_symp 的换算，不改变仿真里的接触**；`tools/contact_probe.py` 当前 10k 实测约 23.0（-6%），100k/1M 约 25.4/28.3 |
 | `r0_calibration_factor` | `1.0` | 直接缩放 p_symp：经验 R0 偏高/偏低时微调（需在 notes 说明） |
 | `transmit_base_prob` | `0.08` | 模型的 `TRANSMIT_BASE_PROB` |
 | `transmit_beta_exponent` | `1.5` | 模型里 `p ∝ beta^1.5` 的指数 |
@@ -287,7 +287,7 @@ gamma   = 1 / T_symp
 
 mu      = ifr × gamma / (0.05 × (1 - ifr))          # 旧版死亡/医疗阈值路径使用
 
-p_symp  = r0 × r0_calibration_factor / (C × T_eff)   # C = 24.6（活动模型实测）
+p_symp  = r0 × r0_calibration_factor / (C × T_eff)   # C = 24.6（活动模型实测；探针现测 10k≈23.0）
 beta    = (p_symp / transmit_base_prob) ^ (1 / 1.5)
 
 immunity_decay = (gain - waning_threshold) / (immunity_days × fpd)
@@ -401,6 +401,13 @@ v3 的 `interventions` 是**社会响应情景参数**（不是流行病学估�
 | reporting | 有症状发病 50% 报告、延迟 3 天（720 帧），只报告有症状 |
 
 派生结果（当前，C=24.6）：
+
+> 注：C 是"每帧有效接触数"的标定常量。2026-11 城市结构重写后，`tools/contact_probe.py`
+> 实测 10k 为 23.0、100k 25.4、1M 28.3。派生仍用 24.6（口径不变，10k 差 -6%），
+> 因此解析 R0 依旧是 3，但经验 R0（`profile_check.py --empirical`）实测约 2.1。
+> 若你改了城市结构参数（`NEIGHBORHOOD_POP`/`VENUE_DENSITY`/`N_DISTRICTS_BASE` 等），
+> 先用探针复测 C，再决定是否调档案里的 `contact_rate_per_frame` 或
+> `r0_calibration_factor`。
 
 ```
 frames = 10800（45 天）
@@ -532,3 +539,18 @@ update 49.1 ms（中位 52.3）/ draw+blit 62.9 ms / CUDA 127.3 MB / wall ≈ 21
 > 改完档案先跑 `python tools/profile_check.py --profile <新名>`：它会检查派生式与
 > CONFIG 是否一致、R0/代际时间是否落在合理量级。实验档是独立文件，不影响其它档案；
 > 放在 `diseases/` 下即可用 `--profile <name>` 加载，不会被任何清单自动纳入。
+
+**第六种（改城市结构）**：城市怎么长出来的不在档案里，而在 `disease_sim/config.py`
+的 CONFIG（`N_DISTRICTS_BASE`、`DISTRICT_EMPLOYMENT_ALPHA`、`COMMUTE_DECAY`、
+`NEIGHBORHOOD_POP`、`WORKPLACE_MEAN_JOBS`、`SCHOOL_SIZE`、`VENUE_DENSITY`、
+`ERRAND_LOCAL_SHARE` 等，可调项见 [REALISM.md](../REALISM.md) §6）。
+这些键会同时改变**接触结构**，所以改完必须：
+
+```powershell
+python tools/contact_probe.py --profile covid19 --population 10000 --frames 480
+python tools/profile_check.py --profile covid19 --empirical --frames 6000
+```
+
+前者给"每帧每人空间邻近数 C"（10k 基准 23.0，派生式用 24.6），后者给经验 R0
+（10k 基准约 2.1，解析 R0=3）。两者同时明显偏离时，才考虑调档案里的
+`contact_rate_per_frame` 或 `r0_calibration_factor` 把 R0 拉回来。

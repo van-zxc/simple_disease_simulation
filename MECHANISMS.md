@@ -219,7 +219,9 @@ untreated_death_hazard  = p_untreated / ward_frames
     `(1 - p_iso) + p_iso × isolation_transmission_mult`。
 - `p_symp = R0 × r0_calibration_factor / (C × T_eff)`，再
   `beta = (p_symp / transmit_base_prob)^(1 / 1.5)`（与旧路径相同的幂变换）。
-  其中 `C = 24.6`（10k 活动模型实测每帧有效接触数）。
+  其中 `C = 24.6`（10k 活动模型实测每帧有效接触数；2026-11 城市结构重写后
+  `tools/contact_probe.py` 实测 10k ≈23.0、100k ≈25.4、1M ≈28.3，见
+  [SCALING.md](SCALING.md) §3「接触率的规模趋势」）。
 - 一致性校验：`r0_check = C × T_eff × p_symp` 必须与目标 R0 严格相等（浮点容差内），
   beta 必须落在变异边界内；`cfr_symp ≥ 1`、`p_ward_death ≥ 1`、`p_comm_death ≥ 1`、
   `T_eff ≤ 0` 都会抛 `ProfileError` 并以非零码退出。

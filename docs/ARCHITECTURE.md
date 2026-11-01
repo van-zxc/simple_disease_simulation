@@ -39,6 +39,14 @@ profiles：完全独立（只依赖标准库）
   便于单测直接构造 `SimState` 的瘦身副本。
 - 连续量（家庭/场所位置、年龄表）在 `build_state()` 里一次性构造；逐帧只写
   `status`/`timer`/`pos`/`place` 等热字段。
+- `build_state()` 的城市部分按固定顺序构造（改它会改随机流与轨迹）：
+  **户规模/家庭构成/年龄 → 城区（`_build_districts`）→ 居住邻里（`_build_neighborhoods`）
+  → 场所（工作/学校按城区、商店按邻里、公园分层铺开，`_venues_around_districts`）
+  → 就业/就学分配（引力通勤 `P(k|h) ∝ w_k·exp(-d/(COMMUTE_DECAY·W))`）
+  → 逐人场馆内落点（`σ_v = √(n_v/2πρ_k)`）**。产物挂在 `sim.district_*`、
+  `sim.neighborhood_center/nb_district`、`sim.venue_occupancy`、
+  `sim.spread_home/work/school`、`sim.local_shop_idx/local_park_idx` 上，
+  `activity.py` 每帧直接读这些张量（不再走 `_spread_lut` 的全局 LUT）。
 - 注释与 docstring 约定沿用模块 docstring + 四类行内标记（RNG/性能/调用方/不变式），
   没有单独的流程文档。
 
