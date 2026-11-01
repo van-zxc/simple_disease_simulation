@@ -38,6 +38,7 @@ python simple_disease_simulation.py --frames 3000                          # 等
 | `--render-every K` | `SIM_RENDER_EVERY` | 每 K 帧重绘一次（模型仍逐帧推进） | `1` |
 | `--async-render [K]` | — | 异步渲染快捷方式（等价 `--render-every K`，默认 2） | — |
 | — | `SIM_RENDER_POINTS` | 散点抽样上限（限制大人口下的绘制成本） | `10000` |
+| — | `DISEASE_INITIAL_SEEDS` | **初始感染人数的绝对值**（不随人口缩放，`0` = 零初始感染；对应配置项 `INITIAL_SEEDS_ABSOLUTE`） | 档案 `population.initial_seeds` × 人口/10000 |
 | — | `CONTACT_MODE` | `auto` / `dense` / `grid` 接触对算法 | `auto` |
 
 内置档案：`covid19`（默认）、`covid19_homogeneous`（同质对照）、`covid19_v2_noiv`

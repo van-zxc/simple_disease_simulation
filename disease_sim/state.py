@@ -613,6 +613,13 @@ def build_state() -> SimState:
     # 向上取整：保证 INITIAL_SEEDS 个种子在每场馆人数少时也能分散到足够多的场馆
     _n_seed_venues = min(n_work, max(1, (CONFIG["INITIAL_SEEDS"] + _per_venue - 1) // _per_venue))
     _seed_pool = torch.where((sim.work_venue_idx >= 0) & (sim.work_venue_idx < _n_seed_venues))[0]
+    # 单位规模是重尾的（对数正态）：按平均人数估出的场馆数可能凑不满 INITIAL_SEEDS
+    # （例如 10k 下编号 0 的单位只有 17 人 → 设 20 只得 17）。逐轮扩大场馆数直到够数，
+    # 保证"设几个就是几个"（上限是所有就业者）。
+    while _seed_pool.numel() < CONFIG["INITIAL_SEEDS"] and _n_seed_venues < n_work:
+        _n_seed_venues = min(n_work, _n_seed_venues * 2 + 1)
+        _seed_pool = torch.where(
+            (sim.work_venue_idx >= 0) & (sim.work_venue_idx < _n_seed_venues))[0]
     seeds = _seed_pool[:CONFIG["INITIAL_SEEDS"]]
     sim.status[seeds] = 2
     sim.virus_beta[seeds] = CONFIG["BASE_TRANSMIT"]

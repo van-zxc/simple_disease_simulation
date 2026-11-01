@@ -80,6 +80,9 @@ _DEFAULTS = {
     "TRIP_MAX_FRAMES": 12,             # 最长出行帧数
     "LOCKDOWN_SHELTER": True,          # 封控时返家（False = 旧版原地冻结）
     "INITIAL_SEEDS": 20,               # 初始感染者数量（随后按人口比例缩放）
+    # 初始感染人数的**绝对值**覆盖：>=0 时直接采用该值，不再乘人口比例（0 = 零初始感染）。
+    # -1 = 关闭（默认，沿用上面的按人口缩放）。环境变量 DISEASE_INITIAL_SEEDS 优先。
+    "INITIAL_SEEDS_ABSOLUTE": -1,
 
     # ---- 城市结构（多中心 / 职住分离 / 规模不变性；现实依据见 REALISM.md §3）----
     # 下列键只决定"谁在哪"，不改变人均密度：人口放大时城区数亚线性增长（城市规模效应），
@@ -288,6 +291,11 @@ def _apply_population_scale() -> None:
     CONFIG["MEDICAL_THRESHOLD"] = max(1, int(round(CONFIG["MEDICAL_THRESHOLD"] * _SCALE)))
     # 初始感染者数按人口比例缩放（至少 1，否则永远不会爆发）
     CONFIG["INITIAL_SEEDS"] = max(1, int(round(CONFIG["INITIAL_SEEDS"] * _SCALE)))
+    # 绝对人数覆盖：>=0 时用绝对人数代替上面的比例缩放（0 允许，用于"零初始感染 + 外部输入"实验）。
+    # 环境变量 DISEASE_INITIAL_SEEDS 优先于 CONFIG，便于不改文件跑对照。
+    _abs_seeds = _env_int("DISEASE_INITIAL_SEEDS", CONFIG["INITIAL_SEEDS_ABSOLUTE"])
+    if _abs_seeds >= 0:
+        CONFIG["INITIAL_SEEDS"] = _abs_seeds
     # 医院数按"每 10 万人"指标换算；只在启用自然史时才参与计算
     if CONFIG["NATURAL_HISTORY_ENABLED"] and CONFIG["N_HOSPITALS_PER_100K"] > 0:
         CONFIG["N_HOSPITALS"] = max(
