@@ -98,7 +98,7 @@ def main(sim) -> None:
     def _frame(frame):
         # 模型每帧都推进；但只用每 K 帧重绘一次（返回空列表 = 本帧不重绘，
         # blit=True 下 FuncAnimation 不会画任何 artist，画面保持上一帧）。
-        # harness 契约：非绘制帧必须返回 []（不是 artists），否则 blit 会重画全部 artist
+        # 调用方契约：非绘制帧必须返回 []（不是 artists），否则 blit 会重画全部 artist
         artists = update(sim, frame)
         if render_every > 1 and frame % render_every:
             return []

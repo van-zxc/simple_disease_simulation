@@ -4,7 +4,7 @@
       接触混合、出行状态与渲染节流（分组见下方注释）。
 不负责：逐帧逻辑（simulation/activity/interventions）、存档读档、绘图对象（render）。
 对外入口：``build_state()`` → ``SimState``；入口模块 ``__getattr__`` 把未知名转发到唯一
-      ``_SIM``，所以这里字段名/形状是 harness 契约（tools/golden_check.py 的 CONTRACT_*）。
+      ``_SIM``，所以这里字段名/形状是调用方契约（工具按属性名读取）。
 不变式：
   - 字段只在这里创建一次，运行期只原地改热字段，不换张量；长度均为 N（场所表除外）。
   - RNG 契约：结构用 numpy rng、疫情/逐帧行为用 torch 流；抽签顺序与形状被 golden 基线固化。
@@ -25,7 +25,7 @@ class SimState:
     """属性包：字段由 ``build_state`` 动态挂到实例上（无类级声明）。
 
     所有可变状态都挂在实例上，update(sim, frame) 的各阶段函数因此只传一个 sim 参数；
-    harness/入口模块按属性名读取，不要在别处往实例上补字段。
+    入口模块与工具按属性名读取，不要在别处往实例上补字段。
     """
 
     def __repr__(self) -> str:  # pragma: no cover - 仅调试用，统计已挂属性个数
@@ -165,8 +165,8 @@ def build_state() -> SimState:
     sim.home_anchor = torch.tensor(home_anchor_np[household_id_np], dtype=torch.float32, device=device)
     sim.pos = sim.home_pos.clone()
 
-    # harness 契约：household_id/agent_age/employed/student/home_pos/home_anchor 被
-    #   tools/golden_check.py 的 CONTRACT_TENSORS 读取；改类型/形状/语义会让基线指纹失配。
+    # 调用方契约：household_id/agent_age/employed/student/home_pos/home_anchor 被
+    #   入口与分析工具读取；改类型/形状/语义会让历史对照失配。
     sim.household_id = torch.tensor(household_id_np, dtype=torch.long, device=device)
     sim.agent_age = torch.tensor(age_np, dtype=torch.long, device=device)
     # 粗年龄组（0=儿童 1=成人 2=老人）：v4 混合矩阵按它聚合；MIX_ON 时再映射到 4 组 age_group
@@ -218,7 +218,7 @@ def build_state() -> SimState:
         0.0, CONFIG["VENUE_SPREAD"]["school"] * 0.5, (stu_idx.size, 2))
     work_pos_np = _clip_world(work_pos_np, 1.5, sim.W, sim.H)
     school_pos_np = _clip_world(school_pos_np, 1.5, sim.W, sim.H)
-    # harness 契约：work_pos/school_pos/work_venue_idx/school_venue_idx/shop_venue/park_venue
+    # 调用方契约：work_pos/school_pos/work_venue_idx/school_venue_idx/shop_venue/park_venue
     #   在 CONTRACT_TENSORS 里；-1 哨兵与固定坐标范围被基线指纹固化。
     sim.work_pos = torch.tensor(work_pos_np, dtype=torch.float32, device=device)
     sim.school_pos = torch.tensor(school_pos_np, dtype=torch.float32, device=device)
@@ -226,7 +226,7 @@ def build_state() -> SimState:
     sim.school_venue_idx = torch.tensor(school_idx_np, dtype=torch.long, device=device)
 
     # ---- 个体状态：status 0..7（语义见 MECHANISMS.md §1 状态码表）----
-    # 初始全 0=S；1(初始免疫)/2(E) 稍后由初始免疫与种子写入。harness 按 status 统计，勿改状态码。
+    # 初始全 0=S；1(初始免疫)/2(E) 稍后由初始免疫与种子写入。统计按 status 取值，勿改状态码。
     sim.status = torch.full((sim.N,), 0, dtype=torch.long, device=device)
 
     # ---- 病毒参数：每人的 beta(传染力)/gamma(康复率)/mu(死亡率)/sigma(变异率)/gen(代数) ----
@@ -282,7 +282,7 @@ def build_state() -> SimState:
     # ---- v2 计时与标记（仅 NH_ENABLED 时由 simulation 的 D 段维护）----
     # 哨兵语义（F 段主机门控按这三段读，别改成 0 基计数）：-1=未启动、>0=倒计时中、==0=本帧到期；
     #   iso_timer 在到期帧置 isolated=True；新感染者会被统一复位回 -1（见 simulation E 段）。
-    # harness 契约：inf_elapsed/symp_elapsed/a_timer/iso_timer/isolated/admission_attempted/
+    # 调用方契约：inf_elapsed/symp_elapsed/a_timer/iso_timer/isolated/admission_attempted/
     #   untreated/beds_total 都在 CONTRACT_TENSORS/CONTRACT_SCALARS 里，初值被 golden 基线固化。
     sim.inf_elapsed = torch.zeros(sim.N, device=device)        # 感染后帧数（E/I/A）
     sim.symp_elapsed = torch.zeros(sim.N, device=device)       # 发病后帧数
@@ -305,7 +305,7 @@ def build_state() -> SimState:
     sim.REPORTING_ON = bool(CONFIG["REPORTING_ENABLED"]) and sim.IV_ENABLED
 
     # 计时器哨兵同 v2：-1=未启动、>0=倒计时中、==0=到期（F 段的 _n_test_pending/_n_trace_pending 读它）。
-    # harness 契约：wants_test/test_timer/tested/trace_timer/quarantined/quarantine_timer 在
+    # 调用方契约：wants_test/test_timer/tested/trace_timer/quarantined/quarantine_timer 在
     #   CONTRACT_TENSORS 里，初值 -1/False 被 golden 基线固化；改变初值等于改轨迹。
     sim.wants_test = torch.zeros(sim.N, dtype=torch.bool, device=device)   # 发病时抽到的检测意愿
     sim.test_timer = torch.full((sim.N,), -1.0, device=device)             # 检测排队剩余帧数；-1=未预约
@@ -315,7 +315,7 @@ def build_state() -> SimState:
     sim.quarantine_timer = torch.full((sim.N,), -1.0, device=device)       # 隔离剩余帧数
 
     # 每日检测上限：TEST_CAPACITY_PER_100K_PER_DAY 是"每 10 万人每天可检测数"，按人口换算取整。
-    # 下面这些是主机侧 Python 标量（不是张量）：每天只更新一次、只被标题/harness 读，
+    # 下面这些是主机侧 Python 标量（不是张量）：每天只更新一次、只被标题/工具读，
     #   放进 GPU 反而每帧多一次显存→主机同步，因此全部留在主机侧。
     sim.test_capacity_day = (int(round(CONFIG["TEST_CAPACITY_PER_100K_PER_DAY"] * sim.N / 100000.0))
                          if sim.TESTING_ON else 0)
@@ -418,7 +418,7 @@ def build_state() -> SimState:
 
     sim.lockdown_active = False
 
-    # 统计（harness 读 strain_stats；F 段每帧 append 新感染/再感染计数，长度=帧数）
+    # 统计（工具读 strain_stats；F 段每帧 append 新感染/再感染计数，长度=帧数）
     sim.strain_stats = {'new_infections': [], 'reinfections': []}
 
     # ==================== 活动/出行状态 ====================

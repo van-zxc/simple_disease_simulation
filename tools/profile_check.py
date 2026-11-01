@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """疾病参数档案校验 / R0 校准工具：判断档案的派生参数是否自洽、R0 是否可信。
 
-输入：diseases/*.json（由 disease_profiles.loader 派生为每帧参数）；输出：控制台报告 + --json。
+输入：diseases/*.json（由 disease_sim.profiles.loader 派生为每帧参数）；输出：控制台报告 + --json。
 两条路径：
 - 解析式（默认）：核对 beta/gamma/mu/潜伏期/帧数、CONFIG 与派生值一致（容差 1e-12~1e-9）、
   医疗阈值、变异边界；R0 用 Euler-Lotka 反解增长率，要求解析校验相对误差 <=1e-3、代际时间 3-8 天。
@@ -26,7 +26,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-import disease_profiles as dp  # noqa: E402
+from disease_sim import profiles as dp  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -221,7 +221,7 @@ def check_analytic(mod) -> dict:
              "mutation.enabled=false（祖先株/无抗原漂移档）")
 
     return {
-        "summary": mod.disease_profiles.format_summary(info),
+        "summary": dp.format_summary(info),
         "frames_per_day": fpd,
         "derived": derived,
         "analytic": analytic,

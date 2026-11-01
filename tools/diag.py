@@ -31,7 +31,7 @@ sys.path.insert(0, str(ROOT))
 
 import torch  # noqa: E402
 
-import golden_check  # noqa: E402
+import _loader  # noqa: E402
 
 PROFILE = sys.argv[1] if len(sys.argv) > 1 else "covid19"
 POP = int(sys.argv[2]) if len(sys.argv) > 2 else 10000
@@ -47,7 +47,7 @@ N_CPROF = 40
 
 
 def _load():
-    """按环境变量加载入口模型（复用 golden_check 的 Agg 打桩），返回 (module, 加载秒数)。"""
+    """按环境变量加载入口模型（复用 _loader 的 Agg 打桩），返回 (module, 加载秒数)。"""
     entry = ROOT / "simple_disease_simulation.py"
     env = {
         "DISEASE_PROFILE": PROFILE,
@@ -55,7 +55,7 @@ def _load():
         "DISEASE_SEED": str(SEED),
         "MPLBACKEND": "Agg",
     }
-    module, load_s, _ = golden_check.load_module(entry, env)
+    module, load_s, _ = _loader.load_module(entry, env)
     return module, load_s
 
 

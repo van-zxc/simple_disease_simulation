@@ -1,7 +1,6 @@
 # 机制说明（自然史 / 社会响应 / 医疗容量）
 
 > 文档分工：本文件讲**机制怎么实现**；结构与数据流见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，
-> 代码约定 / 新增机制流程见 [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md)，
 > 参数与缩放见 [SCALING.md](SCALING.md)，档案字段见 [diseases/README.md](diseases/README.md)。
 
 本文档说明当前代码（`simple_disease_simulation.py` 薄入口 + `disease_sim/` 模块 +
@@ -26,7 +25,7 @@
 | 时变传染力曲线 | `disease_sim/disease.py`（`_curve_symp`/`_curve_asym` 惰性插值表 + `_curve_eval`） |
 | 渲染与交互 | `disease_sim/render.py`（`build_render`，`toggle` 挂在 `sim.toggle`） |
 | 档案加载/校验/派生/应用 | `disease_sim/profiles/{loader,validate,derive,apply}.py`；根级 `disease_profiles.py` 只是兼容 shim |
-| 验收工具 | `tools/headless_check.py`（38 项断言）、`tools/golden_check.py`（历史快照，非门禁）、`tools/profile_check.py`（解析/经验）、`tools/bench.py`（性能） |
+| 测量工具 | `tools/profile_check.py`（解析/经验 R0）、`tools/bench.py`（耗时/显存）、`tools/ensemble.py`（多 seed 分布）、`tools/diag.py`（算子/派发归因） |
 
 ## 1. 状态与转移
 
@@ -276,8 +275,7 @@ covid19 档案当前派生值（可用 `python tools/profile_check.py --profile 
 - `update()` 只在 `IV_ENABLED` 时执行日界事件（`_daily_step`）与密接隔离倒计时
   （`_advance_quarantine`）；检测出结果与追踪到期只在自然史分支内调用。
 - 关闭时只做张量初始化与常量判断，**不消耗 torch 随机数**：`toy`（v1）与
-  `covid19_v2_noiv`（schema 3、省略 `interventions`）因此保持旧行为，并作为
-  `golden_check` 的历史快照档（非门禁；见 §8、§10）。
+  `covid19_v2_noiv`（schema 3、省略 `interventions`）因此保持旧行为。
 
 ### 7.2 检测（`TESTING_ON`）
 
@@ -322,7 +320,6 @@ covid19 档案当前派生值（可用 `python tools/profile_check.py --profile 
 > **行为影响**（covid19 10k，3000 帧）：隔离总量 p10/p50/p90 0 → **316/346/467**，
 > 攻击率 p50 0.050 → **0.040**（追踪压低了传播），二代 var/mean p50 2.32 → **2.62**
 > （k 中位 1.31，超传播仍显著）；`toy` 与 `covid19_v2_noiv` 关闭路径计数不变。
-> 回归锁：`tests/test_audit_fixes.py` 的 `trace_long`（2600 帧断言隔离总量>0）。
 
 ### 7.4 行为反馈（`BEHAVIOR_ON`）
 
@@ -363,7 +360,7 @@ covid19 档案当前派生值（可用 `python tools/profile_check.py --profile 
 其中 Q = 当前密接隔离中人数，Test = 累计检测出结果人数，Rep = 累计报告数，
 mult = 当前行为接触乘子（两位小数）。另有内部计数器
 `tests_today`/`tests_total`/`quarantine_total`/`onset_total`/`reported_total`
-供工具与 harness 使用。
+供工具读取。
 
 ### 7.7 covid19 档案的 v3 参数（实际值）
 
@@ -406,11 +403,11 @@ mult = 当前行为接触乘子（两位小数）。另有内部计数器
 
 - `toy` 走 legacy 路径时：状态机仍是旧的 6 状态（A/H 永不出现），旧潜伏/发病/
   死亡康复路径代码不变，随机数调用序列不变 → 旧基线逐位一致；统计 `counts`
-  长度为 8 但 `[6]/[7]` 恒为 0；harness `m6` 断言这一点。
+  长度为 8 但 `[6]/[7]` 恒为 0。
 - 所有 v3 随机抽取都放在 `IV_ENABLED` / 子开关为 True 的分支内；关闭时
   不建检测/追踪随机流。
 - 关闭社会响应但开启自然史（`covid19_v2_noiv`）：行为与自然史代码路径一致，
-  因不执行任何 v3 分支，RNG 序列与加 v3 前相同；`golden_check` 用它做回归档。
+  因不执行任何 v3 分支，RNG 序列与加 v3 前相同；历史快照用它做对照档。
 
 ## 9. 已知简化与偏差（相对真实模型）
 
@@ -432,47 +429,27 @@ mult = 当前行为接触乘子（两位小数）。另有内部计数器
 
 已知未完成项（如实列出）：
 
-- 重构后大人口（触发 `grid` 接触路径）的性能基准与结构验收仍由 Lead 统一补齐
+- 重构后大人口（触发 `grid` 接触路径）的性能基准仍由 Lead 统一补齐
   （见 [SCALING.md](SCALING.md) §6.2）；10k 默认走稠密路径，不受影响。
 - `tools/profile_check.py` 不感知 v3：它仍按自然史（无社会响应）路径做解析与
   经验校准，因此 covid19 仿真轨迹低于其经验 R0 基准属预期，不代表文档错误。
-- harness 的 v3 断言（m7–m10）是结构/一致性检查，不是 v3 参数校准。
+- 这些一致性检查是结构级校验，不是 v3 参数校准。
 
-## 10. 验证
+## 10. 自检命令
+
+项目不含测试套件；验证方式是跑一次冒烟、看派生值、看多 seed 分布：
 
 ```powershell
-python tools/headless_check.py --profile toy --frames 300          # legacy 逐位/结构验收
-python tools/headless_check.py --profile covid19 --frames 3000     # v2 自然史 + v3 社会响应 + v4 异质性
-python tools/headless_check.py --profile covid19_v2_noiv --frames 400   # 关闭社会响应回归
-python tests/test_heterogeneity.py                                 # v4 异质性/混合结构回归（含超传播统计）
+python simple_disease_simulation.py --profile toy --frames 30       # 入口冒烟
+python tools/profile_check.py --profile covid19                   # 解析式：beta/R0/代际/倍增
 python tools/ensemble.py --profile covid19 --population 10000 --frames 3000 `
-    --seeds 1-12 --jobs 4 --json benchmarks/ensemble.json --png benchmarks/ensemble.png  # 多 seed 分位带
-python tools/ensemble.py --profile covid19 --population 10000 --frames 3000 `
-    --seeds 1-4 --track-secondary --json benchmarks/ensemble_secondary.json  # 超传播诊断
-python tools/profile_check.py --profile covid19                    # 解析式：beta/R0/代际
-python tools/profile_check.py --profile covid19 --empirical        # 小规模仿真经验 R0（v2 路径）
-python tools/golden_check.py --profile covid19 --frames 500 --compare benchmarks/golden_v3_500.json
-python tools/bench.py --profile covid19 --frames 400 --label after # 性能口径
+    --seeds 1-12 --jobs 4 --json benchmarks/ensemble.json         # 多 seed 分位带
+python tools/bench.py --profile covid19 --frames 400 --label after  # 性能口径
 ```
 
-`headless_check.py` 当前共 **38 项**断言，分为：
+`benchmarks/` 里的 `golden_*.json` 是历史快照（采集于性能优化前的版本），
+只作长跑与量级参照；性能口径见 [SCALING.md](SCALING.md)。
 
-| 组 | 覆盖 |
-| --- | --- |
-| `a1`–`a3` | 标题/状态/计数基本一致性 |
-| `b`、`c1`–`c4`、`d1`–`d2` | 状态总量、历史曲线、轴限、按钮、blit artist |
-| `e`、`f` | 再感染窗口、免疫消退 |
-| `g1`–`g2` | 封控按钮与 Lock 标题 |
-| `h1`–`h2`、`i` | 标题解析、显存/设备 |
-| `j1`–`j2` | 地点合法性、在途状态 |
-| `k1`–`k6` | 昼夜节律、出行频率、出行时长、夜间同住、地点合法、周末在岗比例 |
-| `m1`–`m6` | 自然史机制：E/A 不直接死亡、Hosp/Unmet 与床位一致、隔离者在家、死亡年龄偏高、v2 长跑出现 A、legacy 不出现 6/7 |
-| `m7`–`m10` | v3 社会响应：检测预算与 tests_total 单调、密接隔离者居家、行为乘子范围且报告数不超过发病数、社会响应关闭时 Q/Test/Rep 全 0 |
-
-`golden_check.py` 的指纹 = 初始化张量内容/形状/dtype 哈希 + 逐帧 `counts` +
-末帧标题；`toy` 300、`covid19` 300/500、`covid19_v2_noiv` 400 四档已由 Lead
-在 2026-10-31 跑通逐位比对；harness 三档（toy/covid19/v2_noiv）也由 Lead 跑通
-0 失败 / 共 38 项（SKIP 7 项，见汇总行；本文不重复声明本机复跑）。性能基线与口径见 [SCALING.md](SCALING.md)。
 
 ## 11. 工程结构（重构后）
 
@@ -490,9 +467,9 @@ python tools/bench.py --profile covid19 --frames 400 --label after # 性能口�
 | 出行与场所 | `disease_sim/activity.py` |
 | 标题/曲线/散点更新 | `disease_sim/simulation.py`（F 段）+ `disease_sim/render.py` |
 
-依赖方向与数据流见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。重构本身不改变任何数值语义：
-`golden_check.py` 对初始化张量、逐帧 counts、标题、RNG 状态、CONFIG 全套比对逐位一致，
-且用原始单文件实现复跑 covid19 3000 帧（12.5 天）得到完全相同的 counts 与标题。
+依赖方向与数据流见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。重构当时不改变任何数值语义：
+用原始单文件实现做初始化张量、逐帧 counts、标题、RNG 状态、CONFIG 的全套逐位比对，
+covid19 3000 帧（12.5 天）完全一致（性能优化轮后不再逐位，见 §11.1）。
 
 长跑金标（covid19，10k，2026-10-31 采集，**采集于性能优化之前**）：3000 帧末帧
 `[9537,0,312,61,0,46,44,0]`；10800 帧（45 天）末帧 `[2405,0,422,779,30,5970,364,30]`
@@ -506,7 +483,6 @@ python tools/bench.py --profile covid19 --frames 400 --label after # 性能口�
 - `disease.py`：分段线性曲线改为 0.25 天步长的 dense LUT + 两次 1D gather + lerp。
   与逐段插值的最大偏差 1.2e-7（曲线折点都是整数天，网格与折点对齐）——因此
   "距发病天数 → 传染力"的映射在数值上等价，但末位可能不同。
-  等价性可复现：`python tools/lut_check.py`。
 - `simulation.py`：统计段把 13–24 个标量合并成一个向量，整帧只做一次
   `.cpu()` 同步；均值由 `arr[mask].mean()` 改为 `(arr*mask).sum()/count`
   （避免掩码索引内部的隐式 `nonzero` 同步，数学上同一个均值）。
@@ -516,9 +492,8 @@ python tools/bench.py --profile covid19 --frames 400 --label after # 性能口�
   小数位、曲线 500 点滚动窗口；散点抽样上限由 20000 调到 10000（大人口下仍是
   固定随机子集，统计/题目数据永远是全体人口）。
 
-因此验收口径改为：`tests/test_stats.py`（分配守恒 + 统计区间 + 跨种子稳健性 +
-同 seed 确定性复跑）+ `tools/headless_check.py` 的 38 项结构断言。
-`golden_*.json` 保留为历史快照与长跑量级参照，不再作为门禁。
+因此验收口径改为统计式：分配守恒（`sum(counts)==N`）、跨 seed 攻击率/病死率量级、
+同 seed 重跑一致；`golden_*.json` 保留为历史快照与长跑量级参照。
 
 ### 11.2 第三轮优化（Wave 1：整幅化 / 索引复用 / 同步消除）
 
@@ -552,7 +527,7 @@ python tools/bench.py --profile covid19 --frames 400 --label after # 性能口�
 
 - **不可观测写**：死亡/康复个体原先会把 5 个 `virus_beta/gamma/mu/sigma/gen` 字段清零，
   但传染力只按 E/I/A 索引读取、病毒均值只对"当前感染者"求、再感染时 transmission 会
-  全量覆写这些字段；`tools/headless_check.py` 也不引用它们。因此这段清零整体删除
+  全量覆写这些字段，也没有任何代码读取它们。因此这段清零整体删除
   （疫情期每帧 20–45 次 `index_put`）。
 - **批量变异**：三组 `beta/gamma/mu` 的"clone → 掩码随机 → 加性偏移 → clamp → 写回"
   合并成一个 `(3, n)` 张量运算（`stack → rand → delta → clamp_ → 3 次写回`），
@@ -566,14 +541,14 @@ python tools/bench.py --profile covid19 --frames 400 --label after # 性能口�
   既少 kernel 也少主机同步。`_daily_step` 用一次 `sum().item()` 同时当判空与名额。
 - **接触对 grid**：目标网格加 1 格外边距，越界邻格自然落到计数为 0 的 padding 格，
   因此不再需要越界掩码（省 4 比较 + 3 与 + 1 cast），邻格步长按 `gxp` 缓存。
-  新增 `tests/test_contacts.py`：5 组构造状态下 dense 与 grid 的 `(src,tar)` 集合
-  必须完全一致、grid 无重复对——这是"按人口切换实现"的正确性保证。
+  另做过 5 组构造状态校验：dense 与 grid 的 `(src,tar)` 集合完全一致、grid 无
+  重复对——这是"按人口切换实现"的正确性保证。
 - **渲染**：主散点 marker 由圆形改为小方块（`s=2` 时顶点数约 1/6，Agg 绘制
   37.3 → 22.2 ms/draw）；新增 `--async-render[=K]`（模型逐帧、每 K 帧重绘，默认 K=2）。
 
 实测：covid19 10k **−15.0%**、1M **−8.3%**（配对中位比）；内核数 877 → 833；
 1M 接触段 4.216 → 3.617 ms（−14.2%）；10k 交互 amortized 47.4 → 30.6 ms（K=1）、
-20.9 ms（K=2，47.9 fps）；`tests/run_all.py --full` 6/6 PASS（当时口径，v4 前）。详见
+20.9 ms（K=2，47.9 fps）；当时全量回归 6/6 PASS（v4 前口径）。详见
 [SCALING.md](SCALING.md) §6.2d。
 
 ## 12. 个体异质性与接触混合（schema v4）
@@ -606,14 +581,14 @@ Poisson 型传播几乎不会"熄火"，也长不出超级传播者，而这恰�
 - 传播时乘在感染者侧：`coef = beta_factor × status_mult × (BASE × lockdown) ×
   virus_scale[infector]`；每个新感染者重新抽自己的乘子（超传播者在整个传染期持续超传播）。
 - σ=1.4 → 理论 Var = e^{σ²}−1 ≈ 6.07；实现里 20 上限截断（约 0.23% 上尾）再归一化后
-  实测约 3.8（`tests/test_heterogeneity.py` 对此有区间断言）。
+  实测约 3.8（曾用区间断言锁定，测试套件已移除）。
 - 实测效果（covid19，10k，12 seeds × 3000 帧，审计修复后复跑）：
   - 跨 seed 攻击率 **1.3% – 9.2%**（同质对照 5.3% – 10.4%），出现"熄火/爆发"分化；
   - 传染期已结束感染者的二代分布 **var/mean p50 2.62**（对照 1.21，接近泊松），
     k ≈ 1.31，零二代比例 24.9%（对照 8.6%）。
 - **统计口径提醒**：二代过散布只能统计"传染期已结束"（不在 E/I/A）的感染者；若把
   仍在传染期的人也计入，尾部截断会把方差压平（全部感染者口径下过散布被高估到 ~2.5，
-  同质对照也 >2），这是 `tests/test_heterogeneity.py` 与 `ensemble --track-secondary`
+  同质对照也 >2），这是 `ensemble --track-secondary`
   都采用 completed 口径的原因。
 
 ### 12.3 依从性个体异质性（`compliance_mean` / `compliance_sd`）
@@ -632,8 +607,7 @@ Poisson 型传播几乎不会"熄火"，也长不出超级传播者，而这恰�
 - **4 组年龄同配**：child 0–19 / adult 20–49 / older 50–69 / senior 70+（由 9 档
   `age_band` 映射 `[0,0,1,1,1,2,2,3,3]`）；`φ(g,h) = 1 − s + s·1{g=h}/n_g`
   （`s` = `age_assortativity`，`n_g` 为组占比下限 0.02）。归一化性质
-  `Σ_g Σ_h n_g n_h φ(g,h) = 1` → **总体 R0 期望不变**（R0 仍 3.00；该式在
-  `tests/test_heterogeneity.py` 中有断言）。
+  `Σ_g Σ_h n_g n_h φ(g,h) = 1` → **总体 R0 期望不变**（R0 仍 3.00）。
 - **症状居家** `symptom_stay_home_fraction`（covid19=0.6）：抽中的感染者一旦进入
   有症状（状态 3）就自动居家，进入 `homebound`，同时把 `_n_restricted` 计数加上当日 I 数
   （这是"确诊前的自发行为反应"，与检测/隔离相互独立）。

@@ -1,8 +1,7 @@
 # 活动 / 轨迹模型说明（REALISM.md）
 
 > 文档分工：本文件讲**像现实与不像现实的地方**（含 v4 补上的"方差"）；
-> 机制实现见 [MECHANISMS.md](MECHANISMS.md)，参数与性能见 [SCALING.md](SCALING.md)，
-> 代码约定见 [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md)。
+> 机制实现见 [MECHANISMS.md](MECHANISMS.md)，参数与性能见 [SCALING.md](SCALING.md)。
 
 本文件说明"人类日常活动轨迹"子模型的假设、参数与可调项，以及它"像现实"和
 "不像现实"的地方。代码已拆分为模块：活动与出行在 `disease_sim/activity.py`，
@@ -149,23 +148,16 @@ loader 统一乘 `frames_per_day = 240` 换算成帧。covid19 的对应关系�
 
 ```powershell
 python -m py_compile simple_disease_simulation.py
-python tools/headless_check.py --frames 300                        # 快速验收（默认 toy 档案，含 k1–k6 活动抽查）
-python tools/headless_check.py --frames 2000 --json out.json       # 完整验收（周末/免疫消退/显存等）
-python tools/headless_check.py --profile covid19 --frames 3000     # 新冠档案（v2 自然史 + v3 社会响应）
-python tools/headless_check.py --profile covid19_v2_noiv --frames 400   # 关闭社会响应的回归档
-python tools/profile_check.py --profile covid19                    # 疾病档案派生值/R0 解析校验
-python tools/golden_check.py --profile toy --frames 300 --compare benchmarks/golden_toy_300.json
+python simple_disease_simulation.py --profile toy --frames 30      # 入口冒烟
+python tools/profile_check.py --profile covid19                   # 疾病档案派生值/R0 解析校验
+python tools/ensemble.py --profile covid19 --population 10000 --frames 3000 --seeds 1-8 --jobs 4
 ```
 
-`headless_check.py` 现共 **38 项**断言。无头验收覆盖：标题计数、状态总量、
-历史曲线、再感染窗口、轴限、按钮、blit artist 数、CUDA 峰值显存，以及活动
-抽查：`k1` 昼夜节律、`k2` 出行频率、`k3` 出行时长/卡住、`k4` 夜间家庭同住、
-`k5` 地点合法、`k6` 周末在岗比例；v3 另有 `m7`–`m10`（检测预算与累计检测
-单调、密接隔离者居家、行为乘子范围与报告数一致性、社会响应关闭时相关计数全 0）。
+当前没有无头验收脚本（2026-11 起移除）。重构前用过一套无头断言核对标题计数、
+状态总量、历史曲线，以及活动抽查（昼夜节律/出行频率/时长/夜间同住/地点合法/
+周末在岗）与 v3 四层机制一致性；相关口径见 [MECHANISMS.md](MECHANISMS.md) §10。
 
-活动模型代码分布在 `disease_sim/state.py`（初始化）与 `disease_sim/activity.py`
-（每帧出行），`tools/golden_check.py` 通过模块级公开名约定接口，逐位比对
-初始化张量与逐帧计数。
+活动模型代码分布在 `disease_sim/state.py`（初始化）与 `disease_sim/activity.py`（每帧出行）。
 
 ## 8. 人口规模扩展（10 万 / 100 万）
 
@@ -191,7 +183,7 @@ python tools/golden_check.py --profile toy --frames 300 --compare benchmarks/gol
   - `covid19`（schema v4）：自然史 + 医疗容量 + 社会响应四层 + v4 个体异质性/接触混合全开；
   - `covid19_v2_noiv`（schema v3，省略 `interventions`）：自然史保留、社会响应
     全关，用于"加 v3 之前"的行为回归；
-  - `toy`（schema v1）：旧演示参数的逐位复刻，harness 默认也用它。
+  - `toy`（schema v1）：旧演示参数（v1 路径），用于快速演示与对照。
 - 档案中时长用"天"、带 `range` 与 `sources`（DOI/URL）；loader 换算为帧（240 帧/天），
   并反推 beta/gamma/mu、有效传染期、隔离/住院路径概率与床位容量。
 - 档案 schema、派生公式、COVID 取值/来源、新增疾病步骤见
@@ -218,7 +210,7 @@ python tools/golden_check.py --profile toy --frames 300 --compare benchmarks/gol
   `hospital_death_share`；各路径再由年龄 `severity_mult` 调制。
 - legacy 兼容：`natural_history_enabled=False` 时状态机、随机流、统计口径与旧版
   一致，`toy` 因此是"legacy 路径还活着"的证据（第二轮性能优化后不再逐位可复现，
-  由 `tests/test_stats.py` 的统计区间 + determinism 用例守护）；v3 关闭时不消耗
+  靠多 seed 分布与重跑对比观察）；v3 关闭时不消耗
   随机数，`covid19_v2_noiv` 因此可做"自然史开启、社会响应关闭"的回归档。
 - 新限制（相对真实模型）：无 ICU/疫苗/变异逃逸/院内传播；社会响应四层都有
   上述覆盖与依从性简化；年龄接触矩阵仍由空间邻近隐式决定。详见

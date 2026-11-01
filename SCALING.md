@@ -1,8 +1,7 @@
 # 人口规模扩展（10k → 100k → 1M）
 
 > 文档分工：本文件讲**参数、缩放与性能实验**；机制见 [MECHANISMS.md](MECHANISMS.md)，
-> 结构与数据流见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，
-> 代码约定与改动流程见 [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md)。
+> 结构与数据流见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 > 性能数字的测量口径极易误读，引用前先看 §6.2（抗漂移 A/B）与 §6.7（诊断）。
 
 本文件说明同一份代码、同一组疾病参数如何通过环境变量 `DISEASE_POPULATION`
@@ -13,8 +12,7 @@
 ## 1. 目标与约束
 
 - 目标：在个人电脑（CUDA GPU）上运行 **10 万 ~ 100 万** 个体的模拟，语义与 10k 版本一致。
-- 约束：疾病参数不重标定；`tools/headless_check.py` 的 **38 项**验收保持通过；
-  同一档案在任意人口下派生结果一致（档案在人口缩放之前应用）。
+- 约束：疾病参数不重标定；同一档案在任意人口下派生结果一致（档案在人口缩放之前应用）。
 - 默认人口仍是 10k；10k 路径走稠密接触矩阵（`CONTACT_MODE="auto"` 自动选择），行为与旧版一致。
 - 疾病参数由 `diseases/*.json` 档案提供（默认 `covid19`，`--profile` /
   `DISEASE_PROFILE` 可切换；见 [diseases/README.md](diseases/README.md)），在人口缩放**之前**应用。
@@ -88,10 +86,8 @@ Population: 1000000 (x100.0), world: 1000.0x1000.0, workplaces: 2000, schools: 8
   （单次 `repeat_interleave`），距离筛选按 `GRID_CHUNK=2,000,000` 分块。
 - `"auto"`（默认）：按 `n_inf*n_tar` 自动选择。
 
-等价性：`tools/headless_check.py --equiv` 对稠密/网格两种枚举做逐对比较
-（判定容差 1e-9，等价则通过；差异只可能来自恰好落在半径边界上的浮点比较）。
-10k 用 auto 时仍走 dense，因此旧版 10k 轨迹不变；重构后 100k/1M 的自动切换
-随人口基准一起由 Lead 回归（见 §6.2）。
+等价性：dense 与 grid 曾在 5 组构造状态上比对 `(src, tar)` 集合完全一致（脚本已删），
+差异只可能来自恰好落在半径边界上的浮点比较。10k 默认走 dense，轨迹不受影响。
 
 ## 5. 渲染抽样
 
@@ -185,10 +181,8 @@ before 22.945→after 19.084（−16.8%）与 28.172→19.821（−29.6%）两�
 运行内可从 12 ms 漂到 19 ms。因此**单世界墙钟收益无法稳定量化，报告以"算子数
 −21% + 纯计算 −6.1%"为准**，不宣称更高的百分比。
 
-由此，**验收口径从"逐位回归"改为"结构不变量 + 统计区间 + 确定性复跑"**：
-`tests/test_stats.py`（分配守恒、标题自洽、跨种子攻击率/病死率区间、同 seed
-两次独立进程末帧一致）替代 `tools/golden_check.py --compare` 作为门禁；
-`golden_*.json` 保留为历史快照与长跑对照，不再参与门禁判定。
+由此，**验收口径从"逐位回归"改为"分配守恒 + 统计区间 + 确定性复跑"**：
+正式测试套件已移除；`golden_*.json` 保留为历史快照与长跑对照，只作参照。
 
 ### 6.2c 第三轮优化（Wave 1：整幅化 / 索引复用 / 同步消除）
 
@@ -238,7 +232,7 @@ contract 全部不变。
 
 决定性诊断（§6.7）显示每帧 877 个 kernel、CPU 占比 76–97%，故本轮直接削 kernel 数：
 
-- **删除不可观测写**：`headless_check.py` 不引用任何 `virus_*` 字段；传染力只按 E/I/A
+- **删除不可观测写**：没有任何代码读取 `virus_*` 字段；传染力只按 E/I/A
   索引读取，均值只对感染者求，再感染时全量覆写 → **死亡/康复个体的 5 个病毒字段清零
   整段删除**（疫情期每帧 20–45 次 `index_put`）。
 - **掩码去重**：`status == 3` 每帧只算一次（隔离倒计时/社区结局共用）；
@@ -268,9 +262,8 @@ F 段统计拼装，继续压缩需要"活跃集合索引化"重构（改变数�
 
 #### W2-B 接触对（parity 先行）
 
-- 新增 `tests/test_contacts.py`：在 5 组构造状态（均匀/聚集/边界/重合点/空集）上比较
-  dense 与 grid 的 `(src, tar)` 集合必须完全相等、grid 无重复对；已接入
-  `tests/run_all.py`（默认档与 `--full` 都会跑，约 3 s）。
+- 在 5 组构造状态（均匀/聚集/边界/重合点/空集）上比对 dense 与 grid 的
+  `(src, tar)` 集合完全相等、grid 无重复对（校验脚本已删，属一次性验证）。
 - `_contact_pairs_grid` 改为**带 1 格外边距的环形步长**：越界邻格自然落到计数为 0 的
   padding 格，省掉 4 个比较 + 3 个与 + 1 次 cast；邻格偏移步长 `dx + dy*gxp` 按 jxp
   缓存在模块字典。
@@ -299,8 +292,7 @@ F 段统计拼装，继续压缩需要"活跃集合索引化"重构（改变数�
 1M + 10000 抽样点在 marker='s' 后为 30.14 ms/draw、amortized 47.28 ms/帧。
 至此"默认 10k 绘制 ≤40 ms"与"`--async-render` 交互 ≥1.5×"两项 W2 承诺均达成。
 
-验证：`python tests/run_all.py --full` → **6/6 PASS**（当时口径，v4 之前；统计/结构 6/6、派生单测 17/17、
-接触对 5/5、harness toy/covid19/v2_noiv 各 0 失败 / 38 项，共 143 s）。
+当时全量回归 6/6 PASS（v4 之前口径，测试套件已移除，数字仅作历史参照）。
 
 ### 6.2e 第五轮：schema v4 个体异质性与接触混合（2026-11-01 凌晨）
 
@@ -351,8 +343,8 @@ compliance 只改阈值不改随机数个数 → `python tools/profile_check.py 
 | 同质对照 covid19_homogeneous（completed） | 1.08 / 1.21 / 1.28 | 9.6–26 | — | — |
 
 ⚠️ **口径警告**：只有"传染期已结束"的感染者适合做过散布统计——把仍在 E/I/A 的人算进去
-会被尾部截断压平/扭曲方差（同质对照也会 >2），`tests/test_heterogeneity.py` 与
-`tools/ensemble.py --track-secondary` 都采用 completed 口径。
+会被尾部截断压平/扭曲方差（同质对照也会 >2），`tools/ensemble.py --track-secondary`
+采用 completed 口径。
 
 **分层代价**（1M 时新增张量）：`virus_scale`/`compliance`/`symp_home` 各 1 个 float32/bool
 向量，1M 合计约 9 MB；`mix_flat` 仅 16 个元素。GPU 显存峰值基本不变。
@@ -372,8 +364,7 @@ compliance 只改阈值不改随机数个数 → `python tools/profile_check.py 
   `_resolve_traces` 只在 `TRACING_ON` 时执行，toy 300 帧 counts 仍逐位 `[18,102,820,6659,1632,769]`。
 - 性能：追踪真正生效后每帧多出 `_resolve_traces` ~2–4 个 kernel；10k 单帧
   `update mean` 仍在 12–14 ms 量级（12-seed 复跑 20–24 ms/帧是 3 进程并行争 GPU 的口径）。
-- 回归锁：`tests/test_audit_fixes.py` 4 用例（床位记账、死者标记、2600 帧追踪长跑、toy 不变式），
-  已并入 `tests/run_all.py` 第 5 阶段。
+- 回归锁（已删）：当时有 4 个用例（床位记账、死者标记、2600 帧追踪长跑、toy 不变式）。
 
 **第二批修复（同日，非轨迹级）**：同一轮审计继续修了派生层与"验证工具自身"的问题，
 它们不改变 covid19 轨迹，但会崩非默认档案、或让"没跑"看起来像"通过"：
@@ -383,7 +374,6 @@ compliance 只改阈值不改随机数个数 → `python tools/profile_check.py 
 | 派生层 | `hospitalization_rate=0`（schema 允许）在派生阈值前就除零，`apply` 直接抛 `ZeroDivisionError` | 阈值改为 `beds_per_1000*10/hosp_rate if hosp_rate>0 else 0.0` | covid19 阈值仍 **375.0**；0 住院率档案可正常应用 |
 | 派生层 | 阈值重复计算两次，第二次忽略 `medical.beds_per_1000` 覆盖值 | 合并为一次、统一用覆盖值 | 有覆盖值的档案阈值与床位口径一致 |
 | 状态层（潜在） | 坐标裁剪两个轴都用 `WIDTH`；`WIDTH/HEIGHT` 是独立键，非方形世界 y 越界 | `_clip_world(pos, margin, W, H)` 按轴裁剪 | 默认 `W==H` 逐元素等价 → 轨迹不变 |
-| 验证工具 | `run_all` 只看退出码、`k/k` 不校验；harness 的 SKIP 计入"通过"；`test_stats` 人口自证；`test_contacts` 无正控制；`golden_check` 把契约缺失写成基线 | 见 `tests/README.md` §5.1 与 `docs/CONTRIBUTING.md` §7 | 门禁对"没跑"不再报绿；toy/covid19/v2_noiv 仍 **0 失败 / 38 项** |
 
 
 
@@ -417,7 +407,7 @@ covid19、600 帧（10k）/300 帧（1M），`SIM_RENDER_EVERY=0`（纯计算，
 | 口径 | 调用方式 | 10k 实测 |
 |---|---|---|
 | 全量重绘（`bench.py` 默认） | 每帧 `fig.canvas.draw()` + `blit(artists)` | 133–232 ms/帧 |
-| 交互 blit（`FuncAnimation(blit=True)` / harness） | 缓存背景 → 每帧 `restore_region` + `draw_artist` + 每 axes 一次 `blit` | **22.2 ms/帧**（marker='s' 后；其中 update 8–10 ms） |
+| 交互 blit（`FuncAnimation(blit=True)`） | 缓存背景 → 每帧 `restore_region` + `draw_artist` + 每 axes 一次 `blit` | **22.2 ms/帧**（marker='s' 后；其中 update 8–10 ms） |
 | 节流渲染（`--render-every K` / `--async-render`） | 模型每帧推进，只每 K 帧重绘 | **K=2: 20.9 ms/帧（47.9 fps）**；K=4/8 见下 |
 
 逐 artist 归因（10k，marker='o' 时）：主散点 PathCollection 39.6 ms、三行 Text 14.7 ms、
@@ -520,9 +510,8 @@ CUPTI 报的"GPU 内核时间"在该量级下被记录开销放大 4 倍以上�
 可复现），优化后 numpy/torch 的浮点运算顺序与 RNG 路径改变，长跑数值会与上表
 有统计等价但非逐位的差异；上表仅作"长跑数量级与崩塌点"的历史参照。
 
-- 验收：`python tests/run_all.py`（统计/结构回归 + profile 派生单测），
-  `--full` 再加 harness 三档（各 0 失败 / 38 项）；S1 之前还跑过 toy 300、covid19 300/500、
-  `covid19_v2_noiv` 400 的四档逐位对照（见 MECHANISMS.md §11 的历史记录）。
+- 验收：当时用统计式回归（分配守恒/量级/重跑一致）与一套结构断言核对；S1 之前还跑过
+  toy 300、covid19 300/500、`covid19_v2_noiv` 400 的四档逐位对照（见 MECHANISMS.md §11）。
 - v3 社会响应的额外开销集中在**日界**：每天一次 `_daily_step`（归档、报告抽样、
   行为乘子、检测排程），检测排程只对"当日有症状且愿意检测"的子集做 argsort；
   检测出结果/追踪到期也是按标记子集操作（S1 优化后进一步用主机侧计数整块跳过
@@ -530,57 +519,42 @@ CUPTI 报的"GPU 内核时间"在该量级下被记录开销放大 4 倍以上�
   **唯一新增缩放量是检测能力随人口线性放大**（80 → 800 → 8000 人/日），
   其余延迟/乘子按帧不变。
 
-## 7. 验证命令
+## 7. 复现实验命令
 
 ```powershell
-python -m py_compile simple_disease_simulation.py tools/headless_check.py
+python -m py_compile simple_disease_simulation.py
 
-# 一键回归：统计/结构回归 + profile 派生单测（约 65 s）
-python tests/run_all.py
+# 入口冒烟（toy，30 帧）
+python simple_disease_simulation.py --profile toy --frames 30
 
-# 全量：上面 + harness 三档 38 项（约 155 s）
-python tests/run_all.py --full
+# 档案派生/解析式 R0 自洽
+python tools/profile_check.py --profile covid19
 
-# 单独跑统计回归（非逐位：分配守恒/统计区间/跨种子/确定性复跑）
-python tests/test_stats.py
+# 多 seed 分布（分位带；--track-secondary 加超传播诊断）
+python tools/ensemble.py --profile covid19 --population 10000 --frames 3000 --seeds 1-12 --jobs 4
 
-# 三档 harness（10k 走 dense，100k/1M 走 grid）
-python tools/headless_check.py --profile toy --frames 300
-python tools/headless_check.py --profile covid19 --frames 500
-python tools/headless_check.py --profile covid19_v2_noiv --frames 400
-
-# 信道/接触算法等价性（dense vs grid）
-python tools/headless_check.py --equiv
-python tests/test_contacts.py --verbose      # 5 组构造状态上的 (src,tar) 集合精确比较
-
-# 性能：单世界 A/B（抗漂移）与多进程吞吐矩阵
+# 性能：单世界 A/B 与多进程吞吐
 python tools/bench.py --profile covid19 --population 10000 --frames 400
 python tools/sweep.py --profile covid19 --population 10000 --frames 600 --jobs-list 1,2,4,8
 python tools/diag.py covid19 10000 42        # 决定性诊断：wall/入队/CPU/kernel 数/aten 明细
 
-# 环境变量旋钮与命令行开关
-$env:SIM_RENDER_EVERY="2"; $env:SIM_RENDER_POINTS="5000"   # 渲染节流/抽样上限
-python simple_disease_simulation.py --async-render         # 模型逐帧、每 2 帧重绘
-
-# 历史快照对照（诊断用；S1 之后不再逐位相等）
-python tools/golden_check.py --profile toy --frames 300 --compare benchmarks/golden_toy_300.json
-
-# 渲染抽查（保存 PNG）
-python tools/headless_check.py --frames 300 --render "50,150,250" --render-dir out
+# 渲染节流/抽样与环境变量旋钮
+$env:SIM_RENDER_EVERY="2"; $env:SIM_RENDER_POINTS="5000"
+python simple_disease_simulation.py --async-render
 ```
+
 
 ## 8. 已知限制
 
 - **GPU 建议**：100k 以上在 CPU 上会非常慢（网格/掩码为逐帧全量操作），CUDA GPU
   是 100k–1M 的可行前提；显存需求约 370 MB 实测峰值（1M），另加少量逐帧临时量。
-- **网格近似**：空间网格用 9 邻格枚举候选对，再按精确距离筛选；`--equiv` 逐对
-  比较两种枚举（判定容差 1e-9）。10k 默认走 dense，不受影响。
+- **网格近似**：空间网格用 9 邻格枚举候选对，再按精确距离筛选（曾在 5 组构造
+  状态上与 dense 比对集合一致）。10k 默认走 dense，不受影响。
 - **渲染抽样**：大人口下散点只显示 10000 人（统计与曲线是全体人口）；如需更多
   可调 `RENDER_MAX_POINTS` 或 `SIM_RENDER_POINTS`，但绘制时间线性增加。
 - **不再逐位可复现**：S1 之后同 seed 同配置的跑次之间，前几百帧通常仍逐位一致，
   但 v2/v3 机制介入后会出现浮点末位差异累积（LUT 曲线、统计向量合并）。确定性
-  （同一份代码、同一 seed、两次独立进程结果相同）仍然成立并由
-  `tests/test_stats.py` 的 determinism 用例守护。
+  （同一份代码、同一 seed、两次独立进程结果相同）仍然成立。
 - **医疗阈值/种子/检测能力按人口放大**：这是"保持 10k 版动态"的选择；若希望
   1M 城市配固定数量床位/检测能力（现实政策约束），需另行按政策改档案或缩放规则。
 - **v3 社会响应是简化机制**：检测只覆盖有症状自愿者、无无症状筛查；追踪只覆盖

@@ -2,12 +2,12 @@
 
 > 文档分工：本文件是**档案字段与校验规则的权威清单**（含新增疾病的 9 步流程）；
 > 机制怎么用这些参数见 [MECHANISMS.md](../MECHANISMS.md)，缩放/性能见
-> [SCALING.md](../SCALING.md)，代码约定见 [docs/CONTRIBUTING.md](../docs/CONTRIBUTING.md)。
+> [SCALING.md](../SCALING.md)。
 
 本目录存放**可切换的疾病参数档案**（JSON）。模型不把疾病相关数字硬编码在
 CONFIG 里，而是启动时从档案加载、校验、派生为每帧参数，再写入 CONFIG。
 代码位置：加载/校验/派生/应用在 `disease_sim/profiles/{loader,validate,derive,apply}.py`，
-子包默认档案与 schema 常量在 `schema.py`；`disease_profiles.py` 只是兼容 shim。
+子包默认档案与 schema 常量在 `schema.py`。
 
 当前 schema 版本：
 
@@ -437,22 +437,15 @@ python tools/profile_check.py --profile covid19
 # 2) 经验检查（约数分钟）：10k 人口跑 6000 帧，拟合早期增长率并报告经验 R0
 python tools/profile_check.py --profile covid19 --empirical --frames 6000
 
-# 3) 结构/机制验收（headless harness；默认 toy）
-python tools/headless_check.py --frames 300
-python tools/headless_check.py --profile covid19 --frames 3000
-python tools/headless_check.py --profile covid19_v2_noiv --frames 400
+# 3) 冒烟（入口直接跑 30 帧）
+python simple_disease_simulation.py --profile <name> --frames 30
 
-# 4) v4 异质性回归（分布层 + 二代过散布 + 守恒；covid19 vs covid19_homogeneous）
-python tests/test_heterogeneity.py --quick
-python tests/test_heterogeneity.py
-
-# 5) 全量回归（统计/结构 + 派生单测 + 接触对 + 异质性；--full 再追加 harness 三档）
-python tests/run_all.py --full
+# 4) 多 seed 量级对照（可选，观察攻击率/住院/超传播）
+python tools/ensemble.py --profile <name> --population 10000 --frames 3000 --seeds 1-8 --jobs 4
 ```
 
-> 历史金标（`tools/golden_check.py --compare benchmarks/golden_*.json`）自第二轮性能
-> 优化起**不再逐位相等**（LUT 曲线与统计合并改变了浮点运算顺序），仅用于量级/长跑
-> 诊断；当前硬门禁是 `tests/run_all.py --full` 与 38 项 harness 断言。
+> 历史上的结构断言与逐位金标工具已在 2026-11 移除；
+> `benchmarks/` 里的 `golden_*.json` 只作长跑/量级参照。
 
 `--empirical` 的拟合方式：把初始感染改为**随机分散种子**（避免默认工作场所集中
 播种放大早期增长率），累计感染数在 `[max(20,0.002N), 0.15N]` 区间内对
@@ -463,11 +456,9 @@ Euler-Lotka 关系 `1 = R0 · ∫ g(t)·e^{-r·t} dt`（g 为自然史传染力�
 注意：`profile_check.py` 不感知 v3，经验校准按"自然史开启、社会响应关闭"路径
 运行；v3 档案的仿真轨迹会因检测/追踪/行为而低于该基准，属预期。
 
-当前验证状态（2026-10-31，由 Lead 执行）：
+当前验证状态（2026-10-31，由 Lead 执行；测试工具已于 2026-11 移除）：
 
-- `golden_check`：`toy` 300、`covid19` 300/500、`covid19_v2_noiv` 400 四档
-  逐位比对通过；
-- `headless_check`：三档（toy / covid19 / covid19_v2_noiv）均 38/38 通过；
+- `profile_check`：`covid19` 解析式 R0 3.00、代际 4.47 天、倍增 2.3 天，PASS；
 - 性能基准（重构前口径）见 [SCALING.md](../SCALING.md) §6。
 
 历史记录（重构前、自然史机制、社会响应未启用的一次 45 天运行，10k、10800 帧、
@@ -500,18 +491,16 @@ update 49.1 ms（中位 52.3）/ draw+blit 62.9 ms / CUDA 127.3 MB / wall ≈ 21
 6. 在 `sources` 里补 DOI/URL/accessed；`notes` 写清模型结构造成的偏差。
 7. 运行 `python tools/profile_check.py --profile <name>` 直到 PASS；必要时用
    `--empirical` 检查经验 R0，再决定是否微调 `r0_calibration_factor`（并在 notes 说明）。
-8. 冒烟 + 结构验收：`python simple_disease_simulation.py --profile <name> --frames 300`
+8. 冒烟 + 量级检查：`python simple_disease_simulation.py --profile <name> --frames 300`
    （CLI 覆盖帧数）或 `MPLBACKEND=Agg SIM_FRAMES=300 python simple_disease_simulation.py --profile <name>`；
-   然后 `python tools/headless_check.py --profile <name> --frames 300` 必须 38/38 PASS。
-9. 回归：`python tests/run_all.py --quick`（契约/派生，十几秒）→ 全量 `--full`（含 harness）。
-   自建档案不会被真实档案清单的循环自动纳入；若要长期保留，建议在
-   `tests/test_profiles.py::test_real_profiles_validate` 的档名列表里加一行。
+   然后再跑 `python tools/profile_check.py --profile <name>` 与一次 `tools/ensemble.py` 看量级是否合理。
+9. 回归：没有自动化套件；用 `tools/profile_check.py` + 一次短 `ensemble` 观察攻击率/住院量级。
+   自建档案不会被任何清单自动纳入；放在 `diseases/` 下即可用 `--profile <name>` 加载。
 10. 若疾病时间尺度很短（如流感），可用 `--frames` / `SIM_FRAMES` 或档案的 `simulation_days` 控制运行长度。
 11. 如需快速复刻旧行为，用 v1 `model_overrides` 简档（参考 `toy.json`）。
 
-> 逐位基线（`tools/golden_check.py --dump`）只用于历史对照；第二轮性能优化起，
-> 官方门禁是 `tests/run_all.py --full` + `tools/headless_check.py`，见
-> [README](../README.md) 验证段。
+> 逐位基线只用于历史对照；正式测试工具已于 2026-11 移除，现在的自查方式是
+> `profile_check` + `ensemble` 量级检查，见 [README](../README.md) 自检段。
 
 ## 8. 模型结构限制（档案里已用 notes 标注）
 

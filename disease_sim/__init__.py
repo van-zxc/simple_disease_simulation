@@ -7,7 +7,7 @@
 失败路径不留下全局注册：档案非法时 init_session 打印原因后 ``sys.exit(1)``；
 build_state/build_render 抛异常时 sim 直接丢弃即可，无需额外清理。
 
-``CONFIG`` 是原地变更的普通 dict，外部代码（tools、headless harness）始终看到同一个对象；
+``CONFIG`` 是原地变更的普通 dict，外部代码（tools）始终看到同一个对象；
 本模块重导出常用符号，``from disease_sim import CONFIG, build_simulation`` 是工具层标准入口。
 """
 
@@ -43,7 +43,7 @@ __all__ = [
 def build_simulation(argv: list[str] | None = None) -> SimState:
     """装配一次完整会话：init_session → build_state → build_render，返回 SimState。
 
-    入口脚本与工具（headless_check / render_prof）复用的唯一装配路径；argv 交给档案
+    入口脚本与工具（bench / render_prof 等）复用的唯一装配路径；argv 交给档案
     解析器（None 时读 sys.argv[1:]）。同进程重复调用可切换档案，但进程级单例（如
     disease 的曲线 LUT 缓存）不会重建，见 disease._LUT_CACHE 的说明。
     """

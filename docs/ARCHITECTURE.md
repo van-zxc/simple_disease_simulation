@@ -6,8 +6,7 @@
 ## 1. 目录结构
 
 ```
-simple_disease_simulation.py     # 薄入口：装配 + 历史接口转发（~60 行）
-disease_profiles.py              # 兼容 shim：re-export disease_sim.profiles
+simple_disease_simulation.py     # 薄入口：装配 + 给分析工具转发模块级名字（~100 行）
 disease_sim/
 ├── __init__.py                  # build_simulation(argv) = init_session → build_state → build_render
 ├── config.py                    # CONFIG 缺省值、档案应用、env 旋钮、人口缩放
@@ -21,12 +20,8 @@ disease_sim/
 ├── cli.py                       # FuncAnimation 入口（含 --render-every / --async-render）
 └── profiles/                    # schema / loader / validate / derive / apply
 diseases/                        # 档案 JSON（covid19 v4 / covid19_homogeneous / v2_noiv / toy）
-tests/                           # run_all.py / test_stats.py / test_profiles.py
-                                 # / test_contacts.py / test_heterogeneity.py
-tools/                           # headless_check / golden_check / bench / sweep / diag
-                                 # / ab_iter / phase_probe / render_prof / lut_check / ensemble
-                                 # （每个工具回答什么问题、结果怎么读：tools/README.md）
-benchmarks/                      # 金标与基准 JSON
+tools/                           # 分析/测量工具（bench / diag / ab_iter / sweep / ensemble …）
+benchmarks/                      # 基准与多 seed 结果（本地数据，不入库）
 ```
 
 ## 2. 模块职责与依赖方向
@@ -44,8 +39,8 @@ profiles：完全独立（只依赖标准库）
   便于单测直接构造 `SimState` 的瘦身副本。
 - 连续量（家庭/场所位置、年龄表）在 `build_state()` 里一次性构造；逐帧只写
   `status`/`timer`/`pos`/`place` 等热字段。
-- **注释与 docstring 约定、新增机制的改动流程、验证门槛**见
-  [CONTRIBUTING.md](CONTRIBUTING.md)（本文件只讲结构与数据流）。
+- 注释与 docstring 约定沿用模块 docstring + 四类行内标记（RNG/性能/调用方/不变式），
+  没有单独的流程文档。
 
 ## 3. 数据流（一帧）
 
@@ -76,21 +71,21 @@ RNG 顺序契约（重构后仍然遵守，但**不再要求跨实现逐位一�
   `age_group[N]`、`mix_flat[16]`、`hh_mult`、`symp_home[N]`（MIX_ON 时）与
   `age_group/mix_flat/symp_home=None`（关闭时）。
 - `tools/ensemble.py` **不改模型**：父进程为每个 seed 起独立子进程
-  （`golden_check.load_module`，env 注入档案/人口/seed/渲染关闭），子进程逐帧
+  （`tools/_loader.load_module`，env 注入档案/人口/seed/渲染关闭），子进程逐帧
   `update` + `cuda synchronize`，每 50 帧记录 counts 序列，结束时打印
   `@@ENSEMBLE@@{json}`；父进程汇总 p10/p50/p90、可选 CSV/PNG 分位带。
   `--track-secondary` 时子进程额外统计逐感染者二代计数（分 `completed` /
   `all` 两个口径，前者才可用来度量超传播过散布）。
 
 
-## 4. 兼容层（为什么 harness 不用改）
+## 4. 兼容层（为什么分析工具不用改）
 
-`tools/headless_check.py` 用 `spec_from_file_location` 直接加载
+`tools/` 里的脚本用 `spec_from_file_location` 直接加载
 `simple_disease_simulation.py`（模块 `__package__` 为空，因此入口自己把仓库根插入
-`sys.path`）。它按名字读取 60+ 个模块级属性（`status`、`fig`、`title_obj`、
-`update` …）。薄入口通过模块级 `__getattr__` 把未知名字转发给唯一的 `_SIM`
+`sys.path`），再按名字读取模块级属性（`status`、`fig`、`title_obj`、`update` …）。
+薄入口通过模块级 `__getattr__` 把未知名字转发给唯一的 `_SIM`
 （`SimState` 实例），标量走 lambda 实时读取，避免陈旧副本；`update(frame)` /
-`toggle(event)` 是真实包装函数，签名与返回值不变。
+`toggle(event)` 是真实包装函数，签名与返回值不变。共享加载逻辑在 `tools/_loader.py`。
 
 ## 5. 渲染路径与节流
 
@@ -109,22 +104,15 @@ RNG 顺序契约（重构后仍然遵守，但**不再要求跨实现逐位一�
 `SIM_RENDER_POINTS` 覆盖）决定 PathCollection 的绘制成本；主散点用 2 px 小方块
 后 10k 点约 7–9 ms/draw，剩余大头是三行标题文本（约 15 ms，每帧都会变）。
 
-## 6. 验证与基准命令
+## 6. 常用命令
 
 ```powershell
-# 统计/结构回归（非逐位：分配守恒 + 统计区间 + 跨种子 + 确定性复跑）
-python tests/run_all.py
-python tests/run_all.py --full          # 追加 harness 三档 38 项
+# 冒烟：跑通并出图（Agg 下不弹窗）
+python simple_disease_simulation.py --profile toy --frames 30
+python simple_disease_simulation.py --profile covid19 --async-render
 
-# 38 项无头断言（结构/机制门禁）
-python tools/headless_check.py --profile toy --frames 300
-
-# 接触算法等价性（dense vs grid 集合完全一致）
-python tests/test_contacts.py --verbose
-
-# v4 异质性回归（分布层 + 二代过散布 + 守恒；--quick 只跑分布层）
-python tests/test_heterogeneity.py --quick
-python tests/test_heterogeneity.py
+# 档案派生 / R0 / 代际时间自洽
+python tools/profile_check.py --profile covid19
 
 # 观测层：多 seed 分位带（不改模型；--track-secondary 打开逐感染者二代统计）
 python tools/ensemble.py --profile covid19 --population 10000 --frames 3000 --seeds 1-12 `
@@ -136,7 +124,6 @@ python tools/ensemble.py --png-from-json benchmarks/ensemble_covid19_10k_12.json
     --png benchmarks/ensemble_covid19_10k_12.png
 
 # 性能：单世界 A/B（抗机器漂移）、分段归因、决定性诊断与多进程吞吐
-python tools/_ab.py covid19 10000 120 5      # 用法: <profile> <population> <frames/round> <rounds> [warm]
 python tools/ab_iter.py --profile covid19 --population 10000 --frames 200 --rounds 8
 python tools/phase_probe.py simple_disease_simulation.py covid19 10000 200
 python tools/diag.py covid19 10000 42
@@ -145,10 +132,6 @@ python tools/sweep.py --profile covid19 --population 10000 --frames 600 --jobs-l
 
 # 渲染抽查（交互 blit 口径）
 python tools/render_prof.py covid19 10000 40 2
-python simple_disease_simulation.py --async-render
-
-# 历史快照对照（诊断用；S1 之后不再逐位相等）
-python tools/golden_check.py --profile toy --frames 300 --compare benchmarks/golden_toy_300.json
 ```
 
 ## 7. 设计草案：单进程 B-world 向量化（未实现）

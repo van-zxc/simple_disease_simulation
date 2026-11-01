@@ -39,11 +39,11 @@ if str(TOOLS) not in sys.path:
 # ---------------------------------------------------------------------------
 def child_main(args: argparse.Namespace) -> int:
     """子进程：加载一个世界 → warm → 打印 SWEEP_READY → 逐帧计时 → 打印结果 JSON。"""
-    import golden_check as gc  # noqa: E402  (延迟 import，避免父进程加载 torch)
+    import _loader as gc  # noqa: E402  (延迟 import，避免父进程加载 torch)
     import torch  # noqa: E402
 
     # SIM_RENDER_EVERY=0 是吞吐口径的前提：不更新散点，省掉每帧两次显存→主机传输；
-    # 其余 env 与 harness 一致（档案/人口/seed/Agg），保证与单进程口径同源。
+    # 其余 env 与 bench.py 一致（档案/人口/seed/Agg），保证与单进程口径同源。
     env = {
         "DISEASE_PROFILE": args.profile,
         "DISEASE_POPULATION": str(args.population),

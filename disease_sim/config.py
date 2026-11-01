@@ -288,7 +288,7 @@ def init_session(argv: list[str] | None = None) -> dict:
             CONFIG["RENDER_MAX_POINTS"] = max(100, int(_render_points))
         except ValueError:
             print(f"[warn] invalid SIM_RENDER_POINTS={_render_points!r}, ignored")
-    ACTIVE_PROFILE_NAME = PROFILE_INFO["profile_id"]   # 供 harness / 工具读取
+    ACTIVE_PROFILE_NAME = PROFILE_INFO["profile_id"]   # 供工具读取
     print(disease_profiles.format_summary(PROFILE_INFO))
     _apply_population_scale()
     return CONFIG

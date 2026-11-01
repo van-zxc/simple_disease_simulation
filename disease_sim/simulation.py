@@ -72,7 +72,7 @@ def update(sim, frame):
     #   G  显存：每 50 帧检查 CUDA 缓存碎片
     # 不变式：A 段只读上一帧末写回的 counts_prev（状态在两次 update 之间不变），
     #         因此 A 段不能依赖本帧 D 段的结果；status 只在 D/E 段写。
-    # 详见 docs/ARCHITECTURE.md §3（一帧数据流）与 docs/CONTRIBUTING.md §3.6。
+    # 详见 docs/ARCHITECTURE.md §3（一帧数据流）与 。
 
     # 行为时钟（第 0 帧 = 07:00；仅用于日程/标题，疾病速率仍按帧计）
     clock_min = (CONFIG["CLOCK_START_MIN"] + frame * sim.MIN_PER_FRAME) % 1440.0
@@ -481,7 +481,7 @@ def update(sim, frame):
                     inf_status == 2,
                     CONFIG["INCUBATING_TRANSMISSION_MULT"], 1.0)
 
-            # 1.5 次幂：病毒 beta→传染力的换算指数（CONTRIBUTING §3.4 点名的魔数）；
+            # 1.5 次幂：病毒 beta→传染力的换算指数（历史校准的魔数）；
             #   beta 逐代变异，幂律放大高 beta 尾部，让"超级病毒"碾压均值。
             beta_factor = torch.pow(sim.virus_beta[inf_indices], 1.5)
             target_immunity = sim.immunity_level[target_indices]
@@ -750,7 +750,7 @@ def update(sim, frame):
     clock_mm = int(clock_min % 60)
 
     # 更新标题（三行：疫情 / 病毒与封控 / 行为时钟与活动构成）。
-    # harness 契约：tools/headless_check.py 的 parse_title 用正则抓 Inf/Symp/Med/Lock/t=/Day/
+    # 调用方契约：标题是固定格式的字段串，正则抓 Inf/Symp/Med/Lock/t=/Day/
     #   Hosp/Unmet/Reinf 这些字段，改文案前先读它；legacy 分支没有 Hosp/Unmet 字段。
     iv_line = ""
     if sim.IV_ENABLED:
@@ -807,6 +807,6 @@ def update(sim, frame):
         if torch.cuda.memory_reserved() - torch.cuda.memory_allocated() > 2 * 2 ** 30:
             torch.cuda.empty_cache()
 
-    # harness 契约：返回的 artist 列表供 FuncAnimation blit；顺序/数量固定为
-    #   scat + title + 8 条 population 线 + 5 条病毒/再感染线 = 15 个（headless_check 断言 N_ARTISTS=15）
+    # 调用方契约：返回的 artist 列表供 FuncAnimation blit；顺序/数量固定为
+    #   scat + title + 8 条 population 线 + 5 条病毒/再感染线 = 15 个（总数固定为 15）
     return [sim.scat, sim.title_obj] + sim.lines_pop + [sim.line_beta, sim.line_mu, sim.line_immunity, sim.line_gen, sim.line_reinf]

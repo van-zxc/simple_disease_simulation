@@ -46,9 +46,9 @@ python simple_disease_simulation.py --frames 3000          # 等价 SIM_FRAMES=3
 | 关掉 v3/v4 看差异 | 用现成对照档 `covid19_v2_noiv`（无社会响应）/ `covid19_homogeneous`（无 v4 异质性），或在自己的档案里把块设 `"enabled": false` | `--profile covid19_homogeneous` |
 | 统计而不是单条轨迹 | `tools/ensemble.py` 多 seed 分位带（p10/p50/p90），可加 `--track-secondary` 看超传播 | `python tools/ensemble.py --population 10000 --frames 3000 --seeds 1-12` |
 
-> 改完档案记得跑 `python tests/run_all.py --quick`（十几秒）确认没有破坏
-> 契约常量与派生规则；`--profile <新名>` 的档案会被 `tests/test_profiles.py` 的
-> 真实档案清单自动忽略，所以不会因为你的实验档导致别人测试变红。
+> 改完档案用 `python tools/profile_check.py --profile <新名>` 自查派生自洽
+> （解析式与 CONFIG 是否一致、R0/代际是否落在合理量级）。实验档是独立文件，
+> 不影响其它档案。
 
 ## 文档地图
 
@@ -56,19 +56,16 @@ python simple_disease_simulation.py --frames 3000          # 等价 SIM_FRAMES=3
 | --- | --- |
 | 怎么跑起来、怎么改参数做实验 | 本文（快速开始 / 改超参数） |
 | 目录结构、模块职责、一帧数据流、兼容层原理 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
-| **代码约定、注释规范、新增机制流程、验证门槛、踩过的坑** | [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) |
 | 每个机制怎么实现（状态机 / 自然史 / 医疗 / v3 社会响应 / v4 异质性） | [MECHANISMS.md](MECHANISMS.md) |
 | 参数取值、量级、缩放、性能与吞吐实验 | [SCALING.md](SCALING.md) |
 | 哪些地方不像真实世界（以及为什么不打算拟合） | [REALISM.md](REALISM.md) |
 | 怎么新增一种疾病 / 档案字段与校验规则 | [diseases/README.md](diseases/README.md) |
-| 有哪些测量/门禁工具、怎么读它们的结果 | [tools/README.md](tools/README.md) |
-| 回归测试都守了什么、怎么加用例 | [tests/README.md](tests/README.md) |
+| 有哪些测量工具、怎么读它们的结果 | [tools/README.md](tools/README.md) |
 
 ## 工程结构
 
 ```
-simple_disease_simulation.py   # 薄入口（装配 + 历史接口转发，~60 行）
-disease_profiles.py            # 兼容 shim（re-export disease_sim.profiles）
+simple_disease_simulation.py   # 薄入口（装配 + 给分析工具转发模块级名字，~100 行）
 disease_sim/                   # 主包
 ├── config.py                  # CONFIG 缺省值 / 档案应用 / 人口缩放
 ├── state.py                   # SimState 容器 + build_state()
@@ -81,21 +78,14 @@ disease_sim/                   # 主包
 ├── cli.py                     # FuncAnimation 入口
 └── profiles/                  # 档案子系统（schema/loader/validate/derive/apply）
 diseases/                      # 档案 JSON
-tools/                         # headless_check / profile_check / golden_check / bench / sweep
-                               # / diag / ab_iter / phase_probe / render_prof / lut_check / ensemble
-                               # （每个工具回答什么问题见 tools/README.md）
-tests/                         # run_all.py / test_stats.py / test_profiles.py / test_contacts.py
-                               # / test_heterogeneity.py
-benchmarks/                    # 金标 + 基准 JSON（可复现证据）
+tools/                         # 分析/测量工具（见 tools/README.md）
+benchmarks/                    # 基准与多 seed 结果（本地数据，不入库）
 docs/ARCHITECTURE.md           # 模块职责、依赖方向、数据流
-docs/CONTRIBUTING.md           # 代码/注释约定、新增机制流程、验证门槛、常见坑
-_orig_sim.py                   # 重构前单文件实现（本地副本，A/B 用；已被 .gitignore 忽略）
-_orig_disease_profiles.py.bak  # 重构前 1327 行 disease_profiles.py（本地副本，仅历史对照）
 ```
 
-> 两个 `_orig_*` 是**本地历史副本**，不参与运行、不提交。`_orig_sim.py` 可用
-> `git show HEAD:simple_disease_simulation.py > _orig_sim.py` 重新生成；
-> `tools/ab_iter.py --before` 与 `tools/_ab.py` 默认读它做重构前后对比。
+> `tools/` 里的脚本通过“加载入口 + 读取模块级名字”驱动模拟，仓库根没有测试目录；
+> 想验证改动是否破坏机制，直接跑 `python tools/profile_check.py` 或
+> `python tools/ensemble.py` 看轨迹/分布是否还合理。
 
 依赖方向单向、无环：`cli → simulation → {activity, contacts, disease, interventions, render}
 → {state, config}`；`profiles` 完全独立。`tools/ensemble.py` 在独立子进程里跑多个 seed
@@ -141,7 +131,7 @@ GPU 负载后整体变慢（draw+blit 代码几乎未改却从 133 ms 涨到 232
 张量决定，而非逐帧临时量；被修复的是**主机内存泄漏**（`mobility_stats` 累积容器，
 1M 下原本每帧新增 1.4 万条记录，45 天将增长到 GB 级，现已封顶 65536 条并改为按日聚合）。
 
-口径说明：`update` 含 `torch.cuda.synchronize()`（比 harness 的 launch-only 计时更严苛）；
+口径说明：`update` 含 `torch.cuda.synchronize()`（比只测 launch 的口径更严苛）；
 `draw+blit` 为 15 个 artist 逐个重绘 + blit；before 为重构前的单文件实现（`_orig_sim.py` 副本），
 after 为当前包实现。测量期间 GPU 非严格独占（桌面约 0.3 GB 占用），三条基准顺序执行。
 注意 `bench.py` 的 `draw+blit` 是**每帧全量 `canvas.draw()`** 的最坏口径；交互式
@@ -186,16 +176,16 @@ toy 10k **−4.0%**（toy 两侧 RNG 流分叉，末帧工作集不同，可比�
 
 | 优化点 | 手法 | 实测效果 |
 |---|---|---|
-| 删除不可观测写 | 死亡/康复者的 5 个 `virus_*` 字段清零整段删除（harness 不读、传染力只读 E/I/A） | 疫情期每帧省 20–45 次 `index_put` |
+| 删除不可观测写 | 死亡/康复者的 5 个 `virus_*` 字段清零整段删除（没有任何代码读它、传染力只读 E/I/A） | 疫情期每帧省 20–45 次 `index_put` |
 | 变异/免疫批量 | 三组病毒参数变异合成 `(3,n)` 张量一次算；免疫增益改 `index_add_`+`clamp_` | 变异块 kernel ≈39 → 17 |
 | 掩码去重与折叠 | `status==3` 每帧一次；`p_pair` 感染者侧系数先合成；v3 三条流程改索引化（去 `bool(any())` 与整幅 N 布尔） | covid19 10k 内核 **877 → 833** |
-| 接触对 grid | 1 格外边距（越界邻格落到空 padding 格，免越界掩码）+ 步长缓存；新增 `tests/test_contacts.py` 5 组 parity | 1M 接触段 4.216 → **3.617 ms（−14.2%）** |
+| 接触对 grid | 1 格外边距（越界邻格落到空 padding 格，免越界掩码）+ 步长缓存；另做过 5 组随机形态 parity 校验 | 1M 接触段 4.216 → **3.617 ms（−14.2%）** |
 | 渲染 | 主散点改小方块 marker（`s=2`，顶点数约 1/6）；新增 `--async-render[=K]` | 10k 交互 **37.3 → 22.2 ms/draw（−40%）**；K=2 amortized 20.9 ms（**47.9 fps**） |
 
-同进程交替 A/B（对照 = 第四轮前快照 `_w2_base/`）：covid19 10k **−15.0%**（配对中位；
+同进程交替 A/B（对照 = 第四轮前快照）：covid19 10k **−15.0%**（配对中位；
 medians −19.3%）、covid19 1M **−8.3%**（medians −11.7%）、toy 10k −22.4%（轨迹分叉，
-仅参考）。全量回归 `python tests/run_all.py --full` → **6/6 PASS**（当时，v4 之前的口径；含接触对 parity 5/5、
-harness 0 失败 / 38 项 ×3）。详见 [SCALING.md](SCALING.md) §6.2d（含 §6.5 渲染三口径更新）。
+仅参考）。当时全量回归 6/6 PASS（接触对 parity + 结构断言；测试套件已移除，
+数字仅作历史）。详见 [SCALING.md](SCALING.md) §6.2d（含 §6.5 渲染三口径更新）。
 
 ### 第五轮（v4 机制）：个体异质性与接触混合（不是性能优化）
 
@@ -213,28 +203,28 @@ harness 0 失败 / 38 项 ×3）。详见 [SCALING.md](SCALING.md) §6.2d（含 
 - 观测层：`tools/ensemble.py` 多 seed 分位带（p10/p50/p90）+ 可选 `--track-secondary`
   逐感染者二代统计；示例输出 `benchmarks/ensemble_covid19_10k_12_after_audit.{json,csv,png}`
   （审计修复后重跑；隔离总量从恒 0 变为 p50 346）。
-- 门禁：`tests/test_heterogeneity.py`（分布层 + 流行病学层 + 守恒）、`covid19`/`covid19_homogeneous`
-  两档案对照；详见 [MECHANISMS.md](MECHANISMS.md) §12 与 [SCALING.md](SCALING.md) §6.2e。
+- 观测层对照：`covid19`（异质性开）与 `covid19_homogeneous`（全中性）两档案，
+  比较分布层方差与二代过散布；详见 [MECHANISMS.md](MECHANISMS.md) §12 与
+  [SCALING.md](SCALING.md) §6.2e。
 
-## 验证
+## 自检与复现实验
+
+项目不含测试套件：验证方式是跑一次冒烟、看档案派生自洽、看多 seed 分布是否合理。
 
 ```powershell
-python tests/run_all.py              # 统计/结构 + 派生单测 + 接触对 + 异质性 + 审计修复（默认约 4 min）
-python tests/run_all.py --full       # 追加 38 项无头 harness 三档（约 5 min，共 8 阶段）
-python tests/test_stats.py           # 单独跑统计回归（分配守恒/统计区间/跨种子/确定性）
-python tests/test_heterogeneity.py   # v4 异质性回归（分布层 + 二代过散布，约 170 s）
-python tests/test_audit_fixes.py     # 审计修复回归（床位记账/死者标记/2600 帧追踪长跑，约 80 s）
-python tools/ensemble.py --profile covid19 --population 10000 --frames 3000 --seeds 1-12 --json benchmarks/ensemble_covid19_10k_12_after_audit.json --png benchmarks/ensemble_covid19_10k_12_after_audit.png
-python tools/headless_check.py --profile toy --frames 300     # 0 失败 / 共 38 项（SKIP 7 项，见汇总行）
+python simple_disease_simulation.py --profile toy --frames 30        # 冒烟：能跑通、能出图
+python tools/profile_check.py --profile covid19                      # 档案派生 / R0 / 代际时间自洽
+python tools/bench.py --profile covid19 --population 10000 --frames 400   # 单帧耗时与显存
+python tools/ensemble.py --profile covid19 --population 10000 --frames 3000 --seeds 1-12 `
+    --json benchmarks/ensemble_covid19_10k_12.json --png benchmarks/ensemble_covid19_10k_12.png
 ```
 
-> **验收口径（2026-10 起）**：第二轮性能优化改变了浮点运算顺序与 RNG 路径
-> （LUT 曲线、统计向量合并），因此**不再要求逐位复现**。门禁改为
-> `tests/test_stats.py`：每帧 `sum(counts)==N`、标题自洽、toy/covid19/v2 的
-> 攻击率与病死率落在统计区间内、跨种子稳健、同 seed 两次独立进程末帧一致。
-> `tools/headless_check.py` 的 38 项结构/机制断言仍然是硬门禁。
+> **验收口径（2026-10 起）**：第二轮性能优化改变了浮点运算顺序与 RNG 路径，
+> **不再要求逐位复现**。判断改动好坏看三件事：每帧 `sum(counts)==N` 守恒、
+> toy/covid19 的攻击率与病死率量级合理、同 seed 重跑轨迹一致（无自动断言，
+> 靠 `tools/ensemble.py` 的分布与两次运行对比观察）。
 
-历史金标证据（`benchmarks/`，S1 之前采集，作为长跑与量级参照，不再逐位比对）：
+历史金标与基准数据在 `benchmarks/`（本地数据、不入库，S1 之前采集，作长跑与量级参照）：
 
 | 文件 | 内容 |
 | --- | --- |
@@ -250,27 +240,21 @@ python tools/headless_check.py --profile toy --frames 300     # 0 失败 / 共 3
 - 检测只覆盖有症状者；无二代追踪、无疫苗/免疫逃逸、无口罩与学校关闭。
 - **v3 追踪/密接隔离已于 2026-11 审计修复**（此前 `trace_timer` 无递减 + 门控恒 0，
   `_resolve_traces` 从不执行、`quarantined` 恒 0）。修复后 covid19 的隔离首次真正生效；
-  回归锁见 `tests/test_audit_fixes.py`（`trace_long`），机制说明见
-  [MECHANISMS.md](MECHANISMS.md) §7.3。
+  机制说明见 [MECHANISMS.md](MECHANISMS.md) §7.3。
 - 同轮审计还修了两处：病房康复释放的床位在同帧不可用（多判 `untreated`）、
-  死者不释放 `quarantined` 标记（隔离计数虚高）。两处均带构造态回归用例。
+  死者不释放 `quarantined` 标记（隔离计数虚高）。
 - `covid19_v2_noiv` 的末帧 counts 因此从历史快照的 `[9977,0,23,0,0,0,0,0]`
   变为 `[9969,0,31,0,0,0,0,0]`（补收更多 `untreated` 是修复的预期行为）。
 - **第二批审计修复（同日，不改 covid19 轨迹）**：① 派生层 `hospitalization_rate=0` 会
   除零崩溃（现阈值置 0），且阈值重复计算忽略 `medical.beds_per_1000` 覆盖；② 世界坐标
   裁剪原先两轴都用 `WIDTH`，非方形世界 y 越界（现按轴使用 `WIDTH/HEIGHT`，默认方形
-  世界逐元素等价）；③ 验证工具的假绿路径（`run_all` 只看退出码、`k/k` 不校验、harness
-  的 SKIP 被当通过、`golden_check --dump` 会把契约缺失写成新基线）已收紧，详见
-  [tests/README.md](tests/README.md) §5.1 与 [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) §7。
-- `tools/golden_check.py` 的 RNG 摘要只覆盖 torch CPU 与当前 CUDA 设备，`compare` 也
-  不比对 device / 人口数（历史金标兼容考虑，未修）。
+  世界逐元素等价）。
 - `tools/profile_check.py` 的解析检查针对 v2 自然史参数，尚未感知 v3 四层机制。
 - v3 长跑（45 天）卫生经济学/干预效果尚无系统实验矩阵，仅单条金标轨迹。
 - 接触对生成在 `dense` 路径仍是 O(N_inf×N_sus) 全对判定（小规模校验用）；`grid` 路径
   为分块空间网格，内存有界。
 - **不再逐位复现**：同 seed 同配置的两次运行在前数百帧通常完全一致，但 v2/v3
-  机制介入后会出现浮点末位差异累积；确定性（同代码同 seed 两次独立进程一致）
-  仍由测试守护。
+  机制介入后会出现浮点末位差异累积；确定性靠两次重跑对比观察，没有自动测试守护。
 - 单进程 GPU 利用率 16–44%（10k/1M），不是算力受限而是小 kernel launch 受限；
   `tools/diag.py` 实测每帧 877–1444 个 torch 算子、CPU 侧每算子约 9–13 µs，
   单帧 CPU 占比 76–97%（见 [SCALING.md](SCALING.md) §6.7）。压榨 GPU 的路径是

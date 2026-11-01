@@ -3,7 +3,7 @@
 负责：3×3 网格布局（主图 + 3 个曲线子图）、15 个动态 artist、静态场所散点、封控按钮。
 不负责：每帧的 artist 数据更新（在 simulation F 段）、模型状态与统计口径。
 
-harness 契约：headless_check 按固定顺序/数量检查这 15 个 artist（2 + 8 + 5，顺序见
+调用方契约：FuncAnimation 按固定顺序取这 15 个 artist（2 + 8 + 5，顺序见
 simulation 的返回值），并要求每个都有 .axes；静态场所散点不在其中，不能挪进返回值。
 """
 
@@ -26,8 +26,8 @@ COLOR_LUT = np.array([to_rgba(c) for c in COLOR_MAP])
 def build_render(sim) -> None:
     """搭建图形、坐标轴、artist 与封控按钮；只在装配阶段调用一次。
 
-    harness 契约：返回给 FuncAnimation 的 artist 顺序为 [scat, title_obj] + lines_pop(8)
-    + [line_beta, line_mu, line_immunity, line_gen, line_reinf]（共 15 个，headless_check
+    调用方契约：返回给 FuncAnimation 的 artist 顺序为 [scat, title_obj] + lines_pop(8)
+    + [line_beta, line_mu, line_immunity, line_gen, line_reinf]（共 15 个，按数量校验的调用方
     校验数量与 .axes）；这里增删 artist 必须同步改 simulation 的返回列表。
     """
     sim.fig = plt.figure(figsize=(18, 10))

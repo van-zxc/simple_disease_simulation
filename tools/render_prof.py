@@ -14,10 +14,10 @@ import pathlib
 import sys
 import time
 
-# 无头 Agg + 复用 golden_check 的加载器；tools 是相对路径，因此必须从仓库根运行。
+# 无头 Agg + 复用 _loader 的加载器；tools 是相对路径，因此必须从仓库根运行。
 os.environ.setdefault("MPLBACKEND", "Agg")
 sys.path.insert(0, str(pathlib.Path("tools").resolve()))
-import golden_check as gc  # noqa: E402
+import _loader as gc  # noqa: E402
 
 profile = sys.argv[1] if len(sys.argv) > 1 else "covid19"
 pop = sys.argv[2] if len(sys.argv) > 2 else "10000"

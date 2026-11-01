@@ -5,7 +5,7 @@
 ``_contact_pairs_dense``（cdist 全矩阵，基准实现，仅小规模/校验用）与
 ``_contact_pairs_grid``（空间网格 + 9 邻格，O(n_tar + 候选对)，大人口默认路径）。
 
-不变式（tests/test_contacts.py 守着）：两条实现给出的 (src, tar) **集合**必须完全
+不变式（曾用一次性脚本校验）：两条实现给出的 (src, tar) **集合**必须完全
 相同且 grid 无重复对；但 dense 是 nonzero 行主序、grid 是"src 升序 + 格序"，配对
 顺序不同 → 喂给 ``torch.rand`` 的随机数配对不同，切换实现不保证逐位一致（10k 默认
 走 dense，历史回归以 dense 为准）。
@@ -57,7 +57,7 @@ def _contact_pairs_grid(sim, inf_indices, target_indices, inf_pos, tar_pos):
     按 GRID_INF_CHUNK 分块枚举自身格 + 8 邻格，距离过滤再按 GRID_CHUNK 分块以限定显存。
 
     不变式：与 ``_contact_pairs_dense`` 的 (src, tar) 集合完全一致且无重复对
-    （tests/test_contacts.py）；``inf_indices``/``target_indices`` 目前只用来取长度，
+    ；``inf_indices``/``target_indices`` 目前只用来取长度，
     位置一律由 inf_pos/tar_pos 给出（保留参数是为与 dense 接口对称）。
     """
     # 格边长 = 感染半径：一个目标只会被"自身格 + 8 邻格"内的感染者命中；gx/gy 上取整

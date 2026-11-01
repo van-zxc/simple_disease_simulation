@@ -11,7 +11,7 @@ import 才是真 A/B（同进程版本 `tools/_ab.py` 因此只对单文件入�
 每轮两侧交替（A→B、B→A、…）让热/时钟漂移均摊；丢弃前 `--drop-rounds` 轮（GPU 时钟
 爬坡）后，报"中位数比"与"配对逐轮比值中位数"两个数；输出控制台表格 + `--json` 落盘。
 
-**噪声地板约 ±3%**（docs/CONTRIBUTING.md §5）：低于 3% 的差不能当收益。绝对
+**噪声地板约 ±3%**（经验值）：低于 3% 的差不能当收益。绝对
 ms 跨会话不可比（笔记本热漂移可达 ±30%），只读同会话内的相对变化。
 """
 
@@ -27,8 +27,8 @@ import sys
 import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-# 默认 before 指向第二轮的快照目录；换对比对象用 --before（必须是 .py，原因见
-# golden_check.load_module 对 .bak 后缀的说明）。
+# 默认 before 指向第二轮的快照目录；换对比对象用 --before（必须是 .py，
+# spec_from_file_location 对 .bak 后缀返回 None）。
 DEFAULT_BEFORE = ROOT / "_w2_base" / "simple_disease_simulation.py"
 DEFAULT_AFTER = ROOT / "simple_disease_simulation.py"
 
@@ -36,13 +36,13 @@ DEFAULT_AFTER = ROOT / "simple_disease_simulation.py"
 def _run_child(argv: list[str]) -> dict:
     """子进程模式：load → warm → 计时 frames 帧 → 返回一行结果 dict。
 
-    帧号从 0 连续编号（warm 段就承担了"首帧推进"），不额外插 harness 的
-    update(0) 探针——两侧协议完全相同即可比，counts 只作同帧号参考、不是验收。
+    帧号从 0 连续编号（warm 段就承担了"首帧推进"），不额外插 update(0)
+    探针——两侧协议完全相同即可比，counts 只作同帧号参考、不是验收。
     """
-    # 复用 golden_check 的加载器（同 harness 环境注入 + 动画打桩），别另抄一份：
+    # 复用 _loader 的加载器（环境变量注入 + 动画打桩），别另抄一份：
     # 两份加载语义一旦漂移，A/B 测到的差异就混进了工具本身。
     sys.path.insert(0, str(ROOT / "tools"))
-    import golden_check as gc  # noqa: E402  (patch matplotlib before torch/mpl use)
+    import _loader as gc  # noqa: E402  (patch matplotlib before torch/mpl use)
 
     entry = pathlib.Path(argv[0]).resolve()
     env = {

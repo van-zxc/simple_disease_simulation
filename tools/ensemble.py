@@ -109,7 +109,7 @@ def child_main(args: argparse.Namespace) -> int:
 
     采样记 S/E/A/I/H/D/R 七条曲线与 4 个计数器；帧号从 warm 开始（与父进程一致）。
     """
-    import golden_check as gc  # 延迟 import：父进程不必加载 torch
+    import _loader as gc  # 延迟 import：父进程不必加载 torch
     import torch
 
     env = {

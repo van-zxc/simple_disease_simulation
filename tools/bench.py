@@ -7,7 +7,7 @@
 口径（与其它工具不同，别混用）：
 - update 计时含 torch.cuda.synchronize()（CUDA 下单帧真实耗时），不含绘制。
 - draw 是每帧 canvas.draw() 全量重绘；Agg 后端的 canvas.blit() 是空实现，所以这里没有逐 artist blit，
-  比 harness 的 restore_region+draw_artist+blit、以及真实 GUI 的 FuncAnimation(blit=True) 都贵。
+  比真实 GUI 的 FuncAnimation(blit=True) 路径贵得多。
 绝对值跨时段/跨机器不可比（热漂移可达 ±30%），只适合同机器同会话 A/B；结论看 per_frame_ms 的相对变化。
 JSON 字段：update/draw_blit={n,mean_ms,median_ms,min_ms,max_ms,total_s}；first_update_ms 含懒初始化，
 warm_update_ms 是第二次 update(0)；per_frame_ms=update.mean+draw.mean（--no-draw 时只有 update）。
@@ -113,7 +113,7 @@ def bench(module, frames: int, measure_draw: bool, label: str) -> dict:
     """跑计时循环，返回一次基准的完整 JSON 结构。
 
     frames 是总 update 次数：先两次 update(0)（首帧含懒初始化、热帧代表稳定态），主循环从 1 跑到
-    frames-1，与 harness 的帧序一致。update 每帧后 synchronize（CUDA）；measure_draw 时再全量
+    frames-1，与分析工具的帧序一致。update 每帧后 synchronize（CUDA）；measure_draw 时再全量
     canvas.draw()（Agg 下 blit 为空实现）。返回值字段见模块 docstring。
     """
     import torch
@@ -147,9 +147,9 @@ def bench(module, frames: int, measure_draw: bool, label: str) -> dict:
         update_samples.append(time.perf_counter() - t0)
         if measure_draw:
             t0 = time.perf_counter()
-            canvas.draw()  # 全量重绘（口径见模块 docstring，比 harness 的 blit 路径贵）
+            canvas.draw()  # 全量重绘（口径见模块 docstring，比 GUI blit 路径贵）
             if artists:
-                canvas.blit(artists)  # Agg 下是空实现；保留调用以贴合 harness/GUI 的调用结构
+                canvas.blit(artists)  # Agg 下是空实现；保留调用以贴合 GUI 的调用结构
             draw_samples.append(time.perf_counter() - t0)
     wall = time.perf_counter() - wall0
 

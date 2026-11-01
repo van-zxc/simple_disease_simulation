@@ -10,7 +10,7 @@ import pathlib
 import time
 
 sys.path.insert(0, str(pathlib.Path("tools").resolve()))
-import golden_check as gc  # noqa: E402
+import _loader as gc  # noqa: E402
 
 import torch  # noqa: E402
 

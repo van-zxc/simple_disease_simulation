@@ -34,7 +34,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--json", dest="json_path", default="")
     args = p.parse_args(argv)
 
-    import golden_check as gc
+    import _loader as gc
 
     entry = pathlib.Path(args.entry).resolve()
     env = {
