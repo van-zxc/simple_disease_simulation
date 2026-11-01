@@ -1,7 +1,9 @@
 # tools/ —— 测量与观测脚本
 
 所有工具都**不修改模型、不写仓库源码**（只写 `benchmarks/` 下的 JSON/PNG），
-统一在仓库根目录运行、无头（`MPLBACKEND=Agg`）。测量类工具**不要并行跑**
+统一在仓库根目录运行、无头：视图栈 2026-11 起是浏览器仪表盘，工具进程用
+`DISEASE_VIEW=headless`（`_loader.patch_headless()` 已自动设置；matplotlib 只在
+`ensemble.py --png` 画分位带图时才用到）。测量类工具**不要并行跑**
 （互相争 GPU 会让 util/耗时失真），跑之前先 `nvidia-smi` 确认没有别的重负载。
 
 > 这里的脚本用来看"跑多快、瓶颈在哪、多 seed 时结果分布如何"，不是质量门禁：
@@ -13,17 +15,17 @@
 | --- | --- | --- |
 | `profile_check.py` | 档案数值是否自洽、经验 R0 是否合理 | `python tools/profile_check.py --profile covid19` |
 | `contact_probe.py` | **每人每帧的空间邻近数 C**（接触率），改城市结构后复测 | `python tools/contact_probe.py --profile covid19 --population 10000 --frames 480` |
-| `bench.py` | 单世界延迟/绘制/显存 + **平均帧率与 1% low**（`update` 含 sync，`draw` 为最坏口径） | `python tools/bench.py --profile covid19 --population 100000 --json benchmarks/b.json` |
+| `bench.py` | 单世界延迟/视图负载/显存 + **平均帧率与 1% low**（`update` 含 sync，`pack` 为服务端打包口径） | `python tools/bench.py --profile covid19 --population 100000 --json benchmarks/b.json` |
 | `ab_iter.py` | **A/B 改动是否真的更快**（两进程交替，抗漂移） | `python tools/ab_iter.py --before _base/simple_disease_simulation.py --profile covid19 --json benchmarks/ab.json` |
 | `diag.py` | 瓶颈是 CPU 派发还是 GPU 算力 | `python tools/diag.py covid19 10000 42` |
 | `phase_probe.py` | 一帧时间花在 mobility / 接触对 / 内联段各多少 | `python tools/phase_probe.py simple_disease_simulation.py covid19 10000 200` |
-| `render_prof.py` | 交互 blit 口径的绘制耗时与节流摊薄 | `python tools/render_prof.py covid19 10000 40 2` |
+| `render_prof.py` | 服务端视图打包（`pack_frame`）耗时、字节数与节流摊薄 | `python tools/render_prof.py covid19 10000 40 2` |
 | `sweep.py` | 多进程吞吐/加速比/util/功耗/显存矩阵 | `python tools/sweep.py --jobs-list 1,2,4,8 --population 10000 --frames 600` |
 | `ensemble.py` | 多 seed 分位带与超传播过散布（观测层，不改模型） | `python tools/ensemble.py --population 10000 --frames 3000 --seeds 1-12` |
 | `gpu_util.py` | 纯 update 循环下单进程能压到多少 GPU 利用率/功耗 | `python tools/gpu_util.py 10000 1200` |
 
-`_loader.py` 是共享加载器（Agg 打桩 + `spec_from_file_location` 加载入口），
-被其它脚本 `import _loader`；单独运行没有输出。
+`_loader.py` 是共享加载器（设 `DISEASE_VIEW=headless` + `spec_from_file_location`
+加载入口），被其它脚本 `import _loader`；单独运行没有输出。
 `_stats.py` 是帧率统计（平均帧率、p95/p99 帧时、**1% low / 0.1% low**），被 `bench.py`
 与 `sweep.py` 复用——1% low = 最慢 1% 帧的平均帧时的倒数，回答"最卡的那 4 帧有多卡"，
 比均值更能暴露分配/同步尖峰。
@@ -32,13 +34,15 @@
 
 ### `bench.py`（单世界延迟）
 
-- `update` 计时**含 `torch.cuda.synchronize()`**；`draw` 是**每帧 `canvas.draw()`
-  全量重绘**（真实 GUI 用 `FuncAnimation(blit=True)`，便宜得多）。
+- `update` 计时**含 `torch.cuda.synchronize()`**；`pack` 是**服务端视图打包**
+  （`render.pack_frame`：统计 JSON + 抽样点云，10k 点 ≈ 88 KB）。浏览器里的绘制
+  不计入这里——它发生在客户端，属于另一条流水线。
 - 绝对值跨时段/跨机器**不可比**（笔记本热漂移可达 ±30%）。只用于同会话趋势；
   要证明"变快了多少"用 `ab_iter.py`。
 - 帧率指标（游戏口径）：`frame_rates.compute` = 只看 update，`frame_rates.per_frame` =
-  update + 全量 draw；各含 `avg_fps`、`p50/p95/p99/max` 帧时与 `one_percent_low` /
+  update + pack；各含 `avg_fps`、`p50/p95/p99/max` 帧时与 `one_percent_low` /
   `point_one_percent_low`。**1% low 与平均帧率差距大 = 有偶发长帧**，差距小 = 帧时稳定。
+- `--no-pack`（旧名 `--no-draw`）：只测 update，不打包视图负载。
 
 ### `ab_iter.py`（A/B 对照）
 
@@ -46,7 +50,8 @@
   输出 before/after 中位数与**配对中位比**；低于 ~3% 视为噪声。
 - `--before` 指向一个历史快照入口（形如 `_base/simple_disease_simulation.py`，
   其目录内需有 `disease_sim/` 与 `diseases/`）。
-- 渲染开关：吞吐/纯计算对比时用 `--no-draw` 或设置 `SIM_RENDER_EVERY=0`。
+- 渲染开关：吞吐/纯计算对比时设 `DISEASE_VIEW=headless`（`_loader` 已默认）或
+  `SIM_RENDER_EVERY=0`。
 
 ### `diag.py`（瓶颈定位）
 
@@ -76,10 +81,13 @@
   把 overdispersion/负二项 k 估歪。
 - `--png-from-json` 只重画图，不重跑模型；图内标签用英文（DejaVu 无 CJK 字形）。
 
-### `render_prof.py`（绘制）
+### `render_prof.py`（视图负载）
 
-- 复刻 `FuncAnimation(blit=True)` 的绘制协议（`restore_region` + `draw_artist` + `blit`），
-  给出 draw 耗时与 `--render-every K` 的摊薄结果。与 `bench.py` 的全量口径不可混谈。
+- 复刻服务端每帧视图路径：`update` + `render.pack_frame`（统计 JSON + 抽样点云），
+  给出 pack 的 ms/帧、字节数（JSON / 点云）与 `--render-every K` 的摊薄结果。
+  与 `bench.py` 的 `pack` 列同口径；浏览器绘制（Canvas 2D）不在服务端计时里。
+- 参考量级：10k 约 0.30 ms/帧、1M 约 0.41 ms/帧，点云恒约 88 KB（抽样上限 10000
+  决定，与人口无关）。历史上的 matplotlib `draw+blit`（133/154 ms）不再是当前口径。
 
 ### `profile_check.py`（档案）
 

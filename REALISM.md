@@ -192,8 +192,8 @@ python tools/ensemble.py --profile covid19 --population 10000 --frames 3000 --se
   `×人口^0.85`、场所散布与出行速度 `×sqrt`、医疗阈值、床位、初始种子与**检测能力**均
   `×pop/10000`；`HOME_CLUSTER_STD` 是物理常量（不缩放）。详细推导见 SCALING.md §3。
   接触率实测随人口略升（23.0 / 25.4 / 28.3），见 §5。
-- 人口 > `RENDER_MAX_POINTS`（20000）时主图散点只画随机抽样的 20000 个个体，
-  标题/曲线/统计仍用全体人口的真实数据。
+- 人口 > `RENDER_MAX_POINTS`（10000）时地图只画随机抽样的 10000 个个体（点云约
+  88 KB/帧、与人口无关），标题/曲线/统计仍用全体人口的真实数据。
 - 接触对枚举在 `n_inf*n_tar > CONTACT_DENSE_LIMIT` 时自动切换到 GPU 空间网格；
   10k 默认仍走稠密矩阵，旧轨迹不变；两种枚举由 `--equiv` 逐对校验（判定容差 1e-9），
   100k/1M 的 grid 路径随 Lead 的大人口基准回归；性能口径见 [SCALING.md](SCALING.md) §6。

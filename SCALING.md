@@ -102,14 +102,18 @@ Population: 1000000 (x100.0), world: 1000.0x1000.0, districts: 120, neighborhood
 ## 5. 渲染抽样
 
 `CONFIG["RENDER_MAX_POINTS"]=10000`：人口超过该值时只渲染随机抽样的 10000 个
-个体（固定随机子集，不逐帧抖动），状态颜色按真实状态着色。图中散点密度因此在
-大人口下仍可读，且 `update()` 的绘图开销受控；统计/标题/曲线仍使用全体人口的
-真实数据。可用环境变量 `SIM_RENDER_POINTS=N` 覆盖（例如交互演示时设 5000
-可把 10k 的 Agg 绘制耗时从 ~59 ms 降到 ~29 ms）。
+个体（固定随机子集，不逐帧抖动），状态颜色按真实状态着色。地图散点密度因此在
+大人口下仍可读，且每帧传给浏览器的点云字节数受控（约 88 KB，与人口无关）；
+统计/标题/曲线仍使用全体人口的真实数据。可用环境变量 `SIM_RENDER_POINTS=N`
+覆盖（例如演示时设 5000 可把点云减半；旧 matplotlib 口径下同样能降低绘制耗时）。
 
 ## 6. 性能基线
 
 ### 6.1 重构前基准（before，Lead 提供；本文引用口径）
+
+> 本节的 `draw+blit` 是**历史口径**（matplotlib Agg，2026-11 前的视图栈）。
+> 当前视图栈是浏览器仪表盘，服务端只做 `pack_frame`，见 §6.5。历史数字保留用于
+> 对照当时的优化幅度，不要再当作"现在每帧要花的视图成本"。
 
 `python tools/bench.py --profile covid19 --frames 400`，结果来自
 `benchmarks/bench_before_10000.json`、`bench_before_100000.json`、
@@ -121,23 +125,24 @@ Population: 1000000 (x100.0), world: 1000.0x1000.0, districts: 120, neighborhood
 | 100k | 21.887 ms | 20.634 ms | 154.248 ms | 169.0 MB | 70.278 s |
 | 1M | 26.585 ms | 25.518 ms | 167.449 ms | 369.72 MB | 77.42 s |
 
-口径：
+口径（历史）：
 
-- `bench.py` 用 Agg 后端 + `DummyFuncAnimation` 打桩，不跑 GUI 事件循环；
+- 当时的 `bench.py` 用 Agg 后端 + `DummyFuncAnimation` 打桩，不跑 GUI 事件循环
+  （当前版已改为无头视图：只测 `update` 与 `pack`，不再涉及 matplotlib）；
   以 `importlib` 导入主入口并记录 `load_s`；
 - 首帧 `update(0)` 含懒初始化（单独记为 `first_update`），再跑一次 warm；
 - 随后逐帧 `update` 计时，CUDA 路径每帧 `torch.cuda.synchronize()`；
-- `draw+blit` 单独计时；`wall` 含加载与绘图；CUDA 峰值取
+- `draw+blit`（历史列）单独计时；`wall` 含加载与绘图；CUDA 峰值取
   `max_memory_allocated`（另记 `reserved`）；
 - 机器：RTX 4060 Laptop GPU、torch 2.5.1+cu124、Python 3.12.5。
 
-读法（同一台机器、同一档案）：
+读法（同一台机器、同一档案，历史口径）：
 
 - `update` 随人口增长主要来自状态向量与接触对规模；1M 时 400 帧均值仍只有
   26.6 ms，说明传播/移动是向量化的；
-- `draw+blit` 在人口 ≥20000 后基本恒定（只画固定抽样点），三档 133–167 ms，
+- 历史 `draw+blit` 在人口 ≥20000 后基本恒定（只画固定抽样点），三档 133–167 ms，
   其中大头是 matplotlib 的绘制；
-- `wall` 的 60–77 s 主要花在 400 帧的 draw+blit 与加载上，不是 `update`。
+- 历史 `wall` 的 60–77 s 主要花在 400 帧的 draw+blit 与加载上，不是 `update`。
 
 ### 6.2 重构后性能（同进程交替 A/B，抗漂移口径）
 
@@ -429,21 +434,26 @@ covid19、600 帧（10k）/300 帧（1M），`SIM_RENDER_EVERY=0`（纯计算，
 并行加速比数字变小，但**绝对吞吐**仍是上升的。定位到"K* 建议"：10k 用 K≈4–8，
 1M 用 K≈2–4（受显存与功耗上限约束，非算力）。
 
-### 6.5 渲染的三种口径与节流
+### 6.5 渲染口径的变迁（2026-11 起为 Web 仪表盘）
+
+> **口径变更**：2026-11 视图栈从 matplotlib 换成浏览器仪表盘（见
+> [MECHANISMS.md](MECHANISMS.md) §11.4）。下表前两行是**历史口径**（Agg/matplotlib，
+> 保留用于对比历史实验）；当前口径是第三行：服务端只做 `render.pack_frame()`
+> （统计 JSON + 抽样点云），绘制在浏览器里。
 
 同一份绘图代码在不同调用协议下成本差 2–3 倍，报告中必须区分：
 
 | 口径 | 调用方式 | 10k 实测 |
 |---|---|---|
-| 全量重绘（`bench.py` 默认） | 每帧 `fig.canvas.draw()` + `blit(artists)` | 133–232 ms/帧 |
-| 交互 blit（`FuncAnimation(blit=True)`） | 缓存背景 → 每帧 `restore_region` + `draw_artist` + 每 axes 一次 `blit` | **22.2 ms/帧**（marker='s' 后；其中 update 8–10 ms） |
-| 节流渲染（`--render-every K` / `--async-render`） | 模型每帧推进，只每 K 帧重绘 | **K=2: 20.9 ms/帧（47.9 fps）**；K=4/8 见下 |
+| 全量重绘（历史，`bench.py` 旧默认） | 每帧 `fig.canvas.draw()` + `blit(artists)` | 133–232 ms/帧 |
+| 交互 blit（历史，`FuncAnimation(blit=True)`） | 缓存背景 → 每帧 `restore_region` + `draw_artist` + 每 axes 一次 `blit` | **22.2 ms/帧**（marker='s' 后；其中 update 8–10 ms） |
+| **服务端打包（当前）** | 每帧 `render.pack_frame()`：统计 dict → JSON（~1 KB）+ 点云（10k 点 ≈ 87.9 KB） | **0.30 ms/帧 @10k、0.41 ms/帧 @1M**（`tools/render_prof.py`）；绘制在浏览器（Canvas 2D） |
+| 节流推送（`--render-every K` / `--async-render`） | 模型每帧推进，只每 K 帧打包推送 | 默认 `--max-fps 60`；K=2 时服务端视图成本减半 |
 
-逐 artist 归因（10k，marker='o' 时）：主散点 PathCollection 39.6 ms、三行 Text 14.7 ms、
+逐 artist 归因（历史，10k，marker='o' 时）：主散点 PathCollection 39.6 ms、三行 Text 14.7 ms、
 8+5 条 Line2D 共 2.0 ms。第四轮把主散点改成小方块后 PathCollection 降到约 7–9 ms
 （绘制 37.3 → 22.2 ms/draw），Text 仍是第二大项（每帧标题都会变，无法跳帧）。
-`100k` + 10000 点 + K=2 时 amortized 37.3 ms/帧（10k 等价人口下约 27 fps，为第三轮数据；
-第四轮后同口径约 25–28 ms）。
+换成浏览器后这些成本整体移出服务端：一次 `pack_frame` 只是两次内存拷贝。
 
 用法：
 
@@ -452,13 +462,14 @@ python simple_disease_simulation.py --profile covid19 --render-every 4
 python simple_disease_simulation.py --profile covid19 --async-render      # 默认 K=2
 $env:SIM_RENDER_EVERY="2"; $env:SIM_RENDER_POINTS="5000"; python simple_disease_simulation.py
 
-# 复现上表（交互 blit 口径 + 节流）：profile / population / frames / K / points
+# 复现"服务端打包"口径：profile / population / frames / K / points
 python tools/render_prof.py covid19 10000 40 2
-python tools/render_prof.py covid19 100000 20 2 10000
+python tools/render_prof.py covid19 1000000 12 1
 ```
 
-`--render-every` / `--async-render` 只影响重绘频率，不影响模型推进（每帧都 `update`），
-因此统计、标题与曲线数据仍然逐帧更新，只是画面每 K 帧刷新一次。
+`--render-every` / `--async-render` 只影响推送频率，不影响模型推进（每帧都 `update`），
+因此统计、标题与曲线数据仍然逐帧更新，只是画面每 K 帧刷新一次；`--max-fps F`
+进一步限制推送帧率（默认 60，0 = 不限）。
 
 ### 6.6 为什么单进程吃不满 GPU
 
@@ -475,7 +486,8 @@ util 推到 91–99%，功耗仍只有 31–33 W（10k）/ 55–59 W（1M）。�
   批成一个大 kernel；跨个体向量化已经做了，跨时间并行会改变语义。
 - 融合内核/`torch.compile` 需要 triton（本环境未安装，属新增依赖）；按项目约定
   不引入新依赖。
-- 交互模式的主成本是 matplotlib 的 CPU 侧绘制（§6.5），GPU 在绘制期间空闲。
+- 交互观感的主成本曾长期是 matplotlib 的 CPU 侧绘制（§6.5）；换成浏览器仪表盘后
+  服务端只剩 `pack_frame`（0.3–0.4 ms），单帧瓶颈重新回到 update 的 CPU 派发。
 - 要真正压榨 GPU，需要"多世界并行"（本仓库 `tools/sweep.py` 已实现进程级并行，
   见 §6.4）或"单进程内 B-world 向量化"（设计见 `docs/ARCHITECTURE.md` §7，
   未实现）。
@@ -583,8 +595,9 @@ python simple_disease_simulation.py --async-render
   是 100k–1M 的可行前提；显存需求约 370 MB 实测峰值（1M），另加少量逐帧临时量。
 - **网格近似**：空间网格用 9 邻格枚举候选对，再按精确距离筛选（曾在 5 组构造
   状态上与 dense 比对集合一致）。10k 默认走 dense，不受影响。
-- **渲染抽样**：大人口下散点只显示 10000 人（统计与曲线是全体人口）；如需更多
-  可调 `RENDER_MAX_POINTS` 或 `SIM_RENDER_POINTS`，但绘制时间线性增加。
+- **渲染抽样**：大人口下地图只显示 10000 人（统计与曲线是全体人口）；如需更多
+  可调 `RENDER_MAX_POINTS` 或 `SIM_RENDER_POINTS`——点云字节与浏览器绘制量随之
+  线性增加（服务端打包本身仍只是逐帧拷贝）。
 - **不再逐位可复现**：S1 之后同 seed 同配置的跑次之间，前几百帧通常仍逐位一致，
   但 v2/v3 机制介入后会出现浮点末位差异累积（LUT 曲线、统计向量合并）。确定性
   （同一份代码、同一 seed、两次独立进程结果相同）仍然成立。

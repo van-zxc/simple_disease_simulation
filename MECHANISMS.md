@@ -442,14 +442,16 @@ mult = 当前行为接触乘子（两位小数）。另有内部计数器
 项目不含测试套件；验证方式是跑一次冒烟、看派生值、看多 seed 分布：
 
 ```powershell
-python simple_disease_simulation.py --profile toy --frames 30       # 入口冒烟
+python simple_disease_simulation.py --profile toy --frames 30       # 入口冒烟（会打印仪表盘 URL）
+python simple_disease_simulation.py --profile toy --frames 30 --headless   # 纯模型、不启服务
 python tools/profile_check.py --profile covid19                   # 解析式：beta/R0/代际/倍增
 python tools/ensemble.py --profile covid19 --population 10000 --frames 3000 `
     --seeds 1-12 --jobs 4 --json benchmarks/ensemble.json         # 多 seed 分位带
-python tools/bench.py --profile covid19 --frames 400 --label after  # 性能口径
+python tools/bench.py --profile covid19 --frames 400 --label after  # 性能口径（update + pack）
 ```
 
-`benchmarks/` 里的 `golden_*.json` 是历史快照（采集于性能优化前的版本），
+入口默认"浏览器连上后才开始推进"，脚本里用 `--headless`（或 `DISEASE_VIEW=headless`）
+避免等待。`benchmarks/` 里的 `golden_*.json` 是历史快照（采集于性能优化前的版本），
 只作长跑与量级参照；性能口径见 [SCALING.md](SCALING.md)。
 
 
@@ -467,7 +469,7 @@ python tools/bench.py --profile covid19 --frames 400 --label after  # 性能口�
 | v3 检测/追踪/行为/报告 | `disease_sim/interventions.py` |
 | 接触对枚举（dense/grid） | `disease_sim/contacts.py` |
 | 出行与场所 | `disease_sim/activity.py` |
-| 标题/曲线/散点更新 | `disease_sim/simulation.py`（F 段）+ `disease_sim/render.py` |
+| 视图负载（统计 → JSON + 点云） | `disease_sim/simulation.py`（F 段产出 `sim.last_stats`）+ `disease_sim/render.py`（`pack_frame`） |
 
 依赖方向与数据流见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。重构当时不改变任何数值语义：
 用原始单文件实现做初始化张量、逐帧 counts、标题、RNG 状态、CONFIG 的全套逐位比对，
@@ -490,9 +492,10 @@ covid19 3000 帧（12.5 天）完全一致（性能优化轮后不再逐位，�
   （避免掩码索引内部的隐式 `nonzero` 同步，数学上同一个均值）。
 - `activity.py`：掩码写改整幅 `torch.where`/`masked_fill_`，行程诊断容器按日聚合
   并封顶（不再每帧 `tolist()` 泄漏主机内存）。
-- 视觉仍遵守原 contract：15 个 artist、`COLOR_LUT` 8 色、标题三段同样的字段与
-  小数位、曲线 500 点滚动窗口；散点抽样上限由 20000 调到 10000（大人口下仍是
-  固定随机子集，统计/题目数据永远是全体人口）。
+- 视图负载仍保留原可视化契约的**字段与小数位**：`COLOR_MAP` 8 色、`title_text`
+  三段同样的字段、曲线 500 点滚动窗口；散点抽样上限 10000（大人口下仍是固定随机子集，
+  统计/标题数据永远是全体人口）。2026-11 起这份契约由 `sim.last_stats` + 点云字节承载，
+  matplotlib 的 15 个 artist 已移除（见 §11.4）。
 
 因此验收口径改为统计式：分配守恒（`sum(counts)==N`）、跨 seed 攻击率/病死率量级、
 同 seed 重跑一致；`golden_*.json` 保留为历史快照与长跑量级参照。
@@ -552,6 +555,28 @@ covid19 3000 帧（12.5 天）完全一致（性能优化轮后不再逐位，�
 1M 接触段 4.216 → 3.617 ms（−14.2%）；10k 交互 amortized 47.4 → 30.6 ms（K=1）、
 20.9 ms（K=2，47.9 fps）；当时全量回归 6/6 PASS（v4 前口径）。详见
 [SCALING.md](SCALING.md) §6.2d。
+
+### 11.4 视图栈换成浏览器仪表盘（2026-11，去 matplotlib）
+
+用户要求"UI 更易读、曲线纵轴自动缩放、被遮挡的参数独立成面板、指标写全称"，
+而 matplotlib 的 blit 在改 `ylim` 后会残留旧刻度（`FuncAnimation._blit_draw` 只在
+`ax._get_view()` 变化时重取背景），因此改为**服务端只产数据、浏览器负责绘制**：
+
+- `simulation.update()` 的 F 段不再设置任何 artist，而是填一个纯 dict `sim.last_stats`
+  （counts/active/hospitalized/on_site/virus/series/interventions/overlay…）。
+- `render.py` 只做序列化：`meta(sim)`（静态描述，连接时一次）、`_build_venue_blob(sim)`
+  （场所层 Float32 x,y,size，一次）、`pack_frame(sim, frame)` → `(JSON 头, 点云)`
+  （点云 = `Float32 xy` + `Uint8 status`，抽样上限 10000 → 约 88 KB/帧）。
+- `server.py`（aiohttp）把字节经 WebSocket 推给 `webui/app.js`；每连接只有一个
+  "最新一帧"槽位，写缓冲超过 4 MB 就丢帧（背压），仿真不会被慢客户端拖住。
+- 前端：地图 Canvas 2D（场所层离屏缓存一次）、关键指标读数块（英文全称 + 中文注释）、
+  5 张独立曲线（活跃感染 / 人群池 / β+免疫 / μ+代际 / 再感染），各自对纵轴做 1-2-5
+  档位自动缩放（放大立即、回落带 62% 滞回，避免刻度抖动）。
+
+**数值语义未变**：状态机、概率、RNG 顺序、统计口径全部原样；变的只是统计值的
+消费方式。服务端视图成本从 Agg `canvas.draw()` 的 133 / 154 ms（10k / 1M）降到
+`pack_frame` 的 **0.30 / 0.41 ms**（`tools/render_prof.py` 实测），绘制成本转移到
+浏览器（60 fps 刷新）。
 
 ## 12. 个体异质性与接触混合（schema v4）
 

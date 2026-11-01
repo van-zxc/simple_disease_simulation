@@ -1,6 +1,6 @@
 # 架构说明（disease_sim 包）
 
-本文件说明重构后的模块划分、依赖方向、一帧的数据流、兼容层原理、渲染路径与
+本文件说明重构后的模块划分、依赖方向、一帧的数据流、兼容层原理、视图路径与
 "多世界并行"的设计草案。
 
 ## 1. 目录结构
@@ -15,9 +15,11 @@ disease_sim/
 ├── contacts.py                  # 接触对枚举（dense 全对 / grid 空间网格）
 ├── disease.py                   # 传染力曲线（dense LUT + lerp）
 ├── interventions.py             # v3：检测、追踪、行为反馈、报告延迟
-├── simulation.py                # update(sim, frame)：一帧编排 + 传播/统计
-├── render.py                    # 图元、按钮、toggle
-├── cli.py                       # FuncAnimation 入口（含 --render-every / --async-render）
+├── simulation.py                # update(sim, frame)：一帧编排 + 传播/统计（产出 sim.last_stats）
+├── render.py                    # 视图负载打包：meta / 场所层 / pack_frame（零绘图库）
+├── server.py                    # aiohttp：静态页 + WebSocket 推帧 + POST /api/toggle
+├── cli.py                       # 入口编排：仿真线程 + 仪表盘服务（--port/--render-every/...）
+├── webui/                       # 前端（index.html / app.js / style.css，纯静态零构建）
 └── profiles/                    # schema / loader / validate / derive / apply
 diseases/                        # 档案 JSON（covid19 v4 / covid19_homogeneous / v2_noiv / toy）
 tools/                           # 分析/测量工具（bench / diag / ab_iter / sweep / ensemble …）
@@ -29,7 +31,8 @@ benchmarks/                      # 基准与多 seed 结果（本地数据，不
 ```
 cli ─→ simulation ─→ {activity, contacts, disease, interventions}
   │         │
-  │         ├─→ render（图元更新）        └─→ state / config
+  │         ├─→ render（视图负载：stats → JSON + 点云）   └─→ state / config
+  ├─→ server ─→ render（meta/场所层/ViewState）
   └─→ config
 profiles：完全独立（只依赖标准库）
 ```
@@ -63,8 +66,18 @@ update(sim, frame)
   │               └─ v4：隔离/追踪概率按个体 compliance 缩放（只改阈值）
   ├─ transmission：接触对枚举 → pair 级概率 → 感染写回 → 变异/再感染计数
   │    └─ v4：感染者侧 ×virus_scale；pair 级 ×(同户系数, 年龄同配 φ)；新感染者抽新 scale
-  └─ stats.finalize：counts/搬运一次 .cpu() → 标题/曲线/散点 → 写回 counts_prev 等
+  └─ stats.finalize：counts/搬运一次 .cpu() → sim.last_stats（纯 dict，供终端与视图层消费）
 ```
+
+输出侧（视图流水线，全在服务端，浏览器只负责画）：
+
+```
+sim.last_stats ──pack_frame()──→ (JSON 头字节, 点云字节) ──ViewState.publish()──→
+server._ws_handler ──WS──→ 浏览器 app.js（Canvas 2D + 自动缩放）
+```
+
+`sim.update` 不碰任何绘图库，`render.py` 只做序列化，`server.py` 只做传输：
+三者之间用"最新一帧槽位"（`render.ViewState`）解耦，慢客户端只会掉帧。
 
 RNG 顺序契约（重构后仍然遵守，但**不再要求跨实现逐位一致**）：所有
 `torch.rand/randn` 抽取的**次数与形状**由 `CONFIG` 开关组合决定；新增随机数必须
@@ -90,34 +103,49 @@ RNG 顺序契约（重构后仍然遵守，但**不再要求跨实现逐位一�
 
 `tools/` 里的脚本用 `spec_from_file_location` 直接加载
 `simple_disease_simulation.py`（模块 `__package__` 为空，因此入口自己把仓库根插入
-`sys.path`），再按名字读取模块级属性（`status`、`fig`、`title_obj`、`update` …）。
+`sys.path`），再按名字读取模块级属性（`status`、`sim`、`last_stats`、`update` …）。
 薄入口通过模块级 `__getattr__` 把未知名字转发给唯一的 `_SIM`
 （`SimState` 实例），标量走 lambda 实时读取，避免陈旧副本；`update(frame)` /
-`toggle(event)` 是真实包装函数，签名与返回值不变。共享加载逻辑在 `tools/_loader.py`。
+`toggle(event)` 是真实包装函数。共享加载逻辑在 `tools/_loader.py`。
 
-## 5. 渲染路径与节流
+去 matplotlib 之后，原来"图形对象"那层契约改成了**数据契约**：
 
-三条路径成本不同，报告时必须分清：
+| 旧（matplotlib） | 新（Web 仪表盘） |
+|---|---|
+| `sim.title_obj.get_text()` → 三行标题 | `sim.last_stats["overlay"]` → 同样的三行文本 |
+| `sim.scat.set_offsets/set_facecolor` | `render.points_blob(sim)` → 抽样点云 |
+| `sim.lines_pop/line_beta/...` 的 `set_data` | `sim.last_stats["series"]` + `sim.history` |
+| `fig.canvas.draw()` / `blit` 计时 | `render.pack_frame()` 计时（tools/bench.py） |
 
-| 路径 | 调用 | 说明 |
+`tools/_loader.patch_headless()` 现在只设 `DISEASE_VIEW=headless`（不再打桩 mpl），
+保证工具进程里误跑 `cli.main()` 也不会去等浏览器。
+
+## 5. 视图路径与节流
+
+浏览器仪表盘把成本拆成两段，报告时必须分清：
+
+| 环节 | 做什么 | 成本 |
 |---|---|---|
-| 全量重绘 | `bench.py`：每帧 `fig.canvas.draw()` | 最坏口径（133–232 ms @10k） |
-| 交互 blit | `FuncAnimation(blit=True)`：缓存背景 → `restore_region` + `draw_artist` + 每 axes 一次 `blit` | 真实 GUI 口径（22 ms @10k，第四轮把主散点改成 `marker='s'` 后） |
-| 节流 | `--render-every K` / `--async-render[=K]`：模型每帧推进，只每 K 帧重绘 | 10k：K=1 30.6 ms、K=2 20.9 ms（47.9 fps）、K=4/8 更低 |
+| 服务端 `pack_frame` | 统计 dict → JSON（~1 KB）+ 抽样点云 → 二进制（`Float32 xy + Uint8 status`，10k 点 ≈ 88 KB） | **0.30 ms @10k / 0.41 ms @1M** |
+| WS 传输 | 每帧一条文本 + 一条二进制；单连接写缓冲 >4 MB 时丢帧 | 局域网/回环，可忽略 |
+| 浏览器绘制 | Canvas 2D：场所静态层离屏缓存一次 → 每帧 blit + 8 状态分桶画 agent + 5 张自动缩放曲线 | 由前端刷新率决定 |
 
-实现要点：`state.render_every` 由 `SIM_RENDER_EVERY`、`--render-every` 或
-`--async-render`（默认 K=2）设置；`cli._frame()` 在非重绘帧返回 `[]`
-（blit=True 下即"本帧不画任何 artist"），模型状态仍逐帧推进，因此标题/曲线数据
-不丢失。散点抽样上限 `CONFIG["RENDER_MAX_POINTS"]`（默认 10000，可用
-`SIM_RENDER_POINTS` 覆盖）决定 PathCollection 的绘制成本；主散点用 2 px 小方块
-后 10k 点约 7–9 ms/draw，剩余大头是三行标题文本（约 15 ms，每帧都会变）。
+节流：`--render-every K`（或环境变量 `SIM_RENDER_EVERY`、快捷方式 `--async-render[=K]`）
+让模型每帧推进、只每 K 帧打包推送一次；`--max-fps F`（默认 60）限制推送帧率。
+地图散点上限 `CONFIG["RENDER_MAX_POINTS"]`（默认 10000，可用 `SIM_RENDER_POINTS`
+覆盖）决定点云字节数——所以 1M 人口的传输量与 10k 相同，差别只在服务端 update。
+对照：旧 matplotlib 的 Agg `canvas.draw()` 是 133 ms @10k / 154 ms @1M，新口径的
+服务端视图成本低约两个数量级（绘制搬到浏览器）。
 
 ## 6. 常用命令
 
 ```powershell
-# 冒烟：跑通并出图（Agg 下不弹窗）
+# 冒烟：跑通（浏览器连上后才开始推进）
 python simple_disease_simulation.py --profile toy --frames 30
 python simple_disease_simulation.py --profile covid19 --async-render
+
+# 只跑模型、不启服务（脚本/工具用）
+python simple_disease_simulation.py --headless --frames 300
 
 # 档案派生 / R0 / 代际时间自洽
 python tools/profile_check.py --profile covid19
@@ -138,7 +166,7 @@ python tools/diag.py covid19 10000 42
 python tools/bench.py --profile covid19 --frames 400 --population 10000 --json benchmarks/bench_after_10000.json
 python tools/sweep.py --profile covid19 --population 10000 --frames 600 --jobs-list 1,2,4,8
 
-# 渲染抽查（交互 blit 口径）
+# 视图负载抽查（pack 口径）
 python tools/render_prof.py covid19 10000 40 2
 ```
 
