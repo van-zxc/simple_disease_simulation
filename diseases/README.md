@@ -39,15 +39,14 @@ CONFIG 里，而是启动时从档案加载、校验、派生为每帧参数，�
 3. 默认值 `covid19`（`disease_sim.profiles.DEFAULT_PROFILE`）
 
 ```bash
-python simple_disease_simulation.py                          # 默认 covid19（v3）
+python simple_disease_simulation.py                          # 默认 covid19（v4，机制全开）
 python simple_disease_simulation.py --profile toy            # 旧演示参数（v1 legacy）
 python simple_disease_simulation.py --profile covid19_v2_noiv  # 关闭社会响应
 DISEASE_PROFILE=covid19 DISEASE_POPULATION=100000 python simple_disease_simulation.py
 SIM_FRAMES=2000 python simple_disease_simulation.py           # 覆盖模拟帧数（快速预览）
 ```
 
-档案在**人口缩放之前**应用；`diseases/*.json` 也记录在
-`benchmarks/golden_*.json` 的回归口径里。
+档案在**人口缩放之前**应用；改参数做实验见 §9。
 
 ## 2. 单位约定
 
@@ -500,7 +499,7 @@ update 49.1 ms（中位 52.3）/ draw+blit 62.9 ms / CUDA 127.3 MB / wall ≈ 21
 11. 如需快速复刻旧行为，用 v1 `model_overrides` 简档（参考 `toy.json`）。
 
 > 逐位基线只用于历史对照；正式测试工具已于 2026-11 移除，现在的自查方式是
-> `profile_check` + `ensemble` 量级检查，见 [README](../README.md) 自检段。
+> `profile_check` + `ensemble` 量级检查，见 [SCALING.md](../SCALING.md) §7。
 
 ## 8. 模型结构限制（档案里已用 notes 标注）
 
@@ -519,3 +518,17 @@ update 49.1 ms（中位 52.3）/ draw+blit 62.9 ms / CUDA 127.3 MB / wall ≈ 21
 - 疾病时间与行为时钟共用抽象刻度，不做真实日历/地区校准；
   `serial_interval_days` 只做经验对照，不参与派生。
 - 攻击率/峰值等"实测数字"是结构参数下的自然结果，不应直接当作真实疫情预测。
+
+## 9. 改超参数做自己的实验（五种方式，按侵入性从低到高）
+
+| 想改的东西 | 做法 | 例子 |
+|---|---|---|
+| 人口 / 种子 / 帧数 | CLI 或环境变量（入口直接解析） | `python simple_disease_simulation.py --population 50000 --seed 3 --frames 6000` |
+| 现有档案里的数字（R0、无症状比例、检测能力、σ、家庭乘子、依从性…） | 复制 `diseases/<档>.json` 为新文件（**文件名 = `profile_id`**），改数值后 `--profile <新名>`；`tools/profile_check.py --profile <新名>` 检查派生自洽 | 见上面 §7 的 11 步流程 |
+| 一次性试验（不想改仓库） | 写一个临时 JSON 用 `model_overrides` 简档（v1 风格）直接覆盖 CONFIG 键 | `toy.json` 就是这种简档 |
+| 关掉 v3/v4 看差异 | 用现成对照档 `covid19_v2_noiv`（无社会响应）/ `covid19_homogeneous`（无 v4 异质性），或在自己的档案里把块设 `"enabled": false` | `--profile covid19_homogeneous` |
+| 统计而不是单条轨迹 | `tools/ensemble.py` 多 seed 分位带（p10/p50/p90），可加 `--track-secondary` 看超传播 | `python tools/ensemble.py --population 10000 --frames 3000 --seeds 1-12` |
+
+> 改完档案先跑 `python tools/profile_check.py --profile <新名>`：它会检查派生式与
+> CONFIG 是否一致、R0/代际时间是否落在合理量级。实验档是独立文件，不影响其它档案；
+> 放在 `diseases/` 下即可用 `--profile <name>` 加载，不会被任何清单自动纳入。

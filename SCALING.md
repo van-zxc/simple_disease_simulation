@@ -586,3 +586,9 @@ python simple_disease_simulation.py --async-render
   状态更新也分块。
 - **工具口径**：`profile_check.py` 不感知 v3，经验 R0 按无社会响应路径校准；
   §6.1 为重构前基准、§6.2 为当前实现与抗漂移 A/B 对照，两者测量时刻不同、不可直接相减。
+- **没有自动化测试套件**（2026-11 起移除）：验证靠 `profile_check.py` 的派生自洽、
+  `ensemble.py` 的多 seed 分布量级、以及同 seed 重跑对比；没有 CI 断言。
+- **dense 接触路径仍是 O(N_inf×N_sus) 全对判定**：10k 默认走 dense（`CONTACT_DENSE_LIMIT`），
+  100k 以上自动切 grid；整体复杂度不随人口平方增长的前提是 grid 生效。
+- **v3 长跑实验不足**：45 天只留过一条历史长跑记录（§6.8），没有干预强度 × 时机的
+  系统矩阵，也不含卫生经济学评估。
