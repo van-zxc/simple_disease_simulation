@@ -1,0 +1,30 @@
+# Python / 运行产物
+__pycache__/
+*.py[cod]
+*.pyd
+
+# 本地渲染输出
+out/
+renders/
+
+# 基准原始 A/B 轮次数据（汇总表在 benchmarks/bench_*.json）
+benchmarks/_ab_*.json
+
+# 本地历史副本（重构前实现，用于 A/B；不提交）
+_orig_*.py
+_orig_*.bak
+
+# 可反复生成的基准数据 / 日志 / 批量跑批产物（本地保留，不入库）
+benchmarks/
+
+# 本地回归脚本（运行入口见 README；不入库，按需本地保留）
+tests/
+
+# 文档示例渲染图（由模拟运行重新生成）
+docs/activity_screenshots/
+
+# 环境/编辑器
+.venv/
+venv/
+.vscode/
+.idea/
