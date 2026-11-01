@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "profile_id": "toy",
+  "label": "Toy disease（旧版演示参数，用于回归与快速演示）",
+  "description": "保持活动模型之前/之后的旧演示行为：5000 帧、40 帧潜伏期、较高的基础传播与死亡。仅用于回归对照与快速演示，不代表真实疾病。",
+
+  "time": {
+    "frames_per_day": 240,
+    "simulation_frames": 5000
+  },
+
+  "population": {
+    "initial_immune_fraction": 0.01,
+    "initial_immune_level": 0.9,
+    "initial_seeds": 20
+  },
+
+  "model_overrides": {
+    "BASE_TRANSMIT": 0.3,
+    "BASE_RECOVERY": 0.008,
+    "BASE_DEATH": 0.01,
+    "MUTATION_RATE": 0.25,
+    "MUTATION_SCALE": 0.15,
+    "INCUBATION_MU": 40.0,
+    "INCUBATION_SD": 10.0,
+    "INCUBATION_MIN": 10.0,
+    "INCUBATION_SELF_RECOVERY": 0.0005,
+    "INCUBATING_TRANSMISSION_MULT": 0.15,
+    "MEDICAL_THRESHOLD": 1000,
+    "TRANSMIT_BASE_PROB": 0.08,
+    "IMMUNITY_GAIN_PER_INFECTION": 0.4,
+    "IMMUNITY_DECAY_RATE": 0.0005,
+    "MAX_IMMUNITY": 0.98,
+    "IMMUNITY_EFFECTIVENESS": 3,
+    "IMMUNITY_WANING_THRESHOLD": 0.1,
+    "INITIAL_SEEDS": 20,
+    "INITIAL_IMMUNE_FRACTION": 0.01,
+    "INITIAL_IMMUNE_LEVEL": 0.9,
+    "FRAMES": 5000,
+    "MUTATION_BOUNDS": {
+      "beta": [0.05, 1.0],
+      "gamma": [0.001, 0.05],
+      "mu": [0.001, 0.15]
+    }
+  },
+
+  "notes": [
+    "这是 old behaviour 的逐位复刻档案：所有数值取自旧版 CONFIG 字面量，用于 toy 回归测试。",
+    "TIME 参数（240 帧/天）只用于活动节律与展示，不代表真实疾病时间尺度。",
+    "如需快速演示请使用本档案：DISEASE_PROFILE=toy 或 --profile toy。"
+  ]
+}

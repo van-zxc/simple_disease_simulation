@@ -1,0 +1,306 @@
+{
+  "schema_version": 3,
+  "profile_id": "covid19_v2_noiv",
+  "label": "COVID-19（SARS-CoV-2 祖先株，2020） (v2 no interventions)",
+  "description": "按 2020 年祖先株的公开文献参数校准（机制性取值，不针对真实曲线拟合）。schema v3 在 v2 自然史之上增加社会响应层：有症状检测、阳性隔离、家庭/场所追踪隔离、风险感知行为反馈与报告延迟/漏报。时间按 240 帧/天换算；45 天 = 10800 帧。",
+  "time": {
+    "frames_per_day": 240,
+    "simulation_days": 45
+  },
+  "population": {
+    "initial_immune_fraction": 0.0,
+    "initial_immune_level": 0.9,
+    "initial_seeds": 20
+  },
+  "epidemiology": {
+    "r0": {
+      "value": 3.0,
+      "range": [
+        2.5,
+        3.5
+      ],
+      "source": "liu2020",
+      "note": "早期估计聚在 2.5-3.5；Liu et al. 汇总均值约 3.28"
+    },
+    "incubation_days": {
+      "mean": 5.5,
+      "sd": 2.3,
+      "min": 1.0,
+      "max": 14.0,
+      "source": "lauer2020",
+      "note": "Lauer 中位 5.1 天、均值 5.5 天、97.5% 在 11.5 天内"
+    },
+    "infectious_days": {
+      "value": 7.0,
+      "range": [
+        5.0,
+        10.0
+      ],
+      "source": "he2020",
+      "note": "症状期均值；无症状与住院期由 natural_history 单独描述"
+    },
+    "symptomatic_fraction": {
+      "value": 0.6,
+      "range": [
+        0.5,
+        0.7
+      ],
+      "source": "he2020",
+      "note": "与 natural_history.asymptomatic_fraction=0.4 互为补；死亡只发生在有症状路径"
+    },
+    "ifr": {
+      "value": 0.0066,
+      "range": [
+        0.0039,
+        0.0133
+      ],
+      "source": "verity2020",
+      "note": "总体 IFR 0.66%（95% CrI 0.39-1.33%）；按每例感染目标使用，住院/社区路径按 hospital_death_share 拆分"
+    },
+    "presymptomatic_transmission_fraction": {
+      "value": 0.4,
+      "range": [
+        0.3,
+        0.5
+      ],
+      "source": "he2020",
+      "note": "He et al. 约 44% 传播发生在症状前；loader 用传染力曲线做数值积分并输出报告值"
+    },
+    "immunity_days": {
+      "value": 180,
+      "range": [
+        90,
+        365
+      ],
+      "source": "bobrovitz2023",
+      "note": "对再感染的保护随时间下降（Omicron 时代综述）；本模型用一个标量免疫力近似"
+    },
+    "hospital_beds_per_1000": {
+      "value": 3.0,
+      "range": [
+        1.0,
+        5.0
+      ],
+      "source": "owid_who",
+      "note": "全球国家中位约 1-5 张/千人；schema v2 用作实际床位容量"
+    },
+    "hospitalization_rate": {
+      "value": 0.08,
+      "range": [
+        0.05,
+        0.12
+      ],
+      "source": "who_cdc",
+      "note": "症状者需住院比例；模型按年龄相对表缩放并归一化到该均值"
+    },
+    "serial_interval_days": {
+      "value": 5.5,
+      "range": [
+        4.0,
+        7.0
+      ],
+      "source": "he2020",
+      "note": "仅用于经验校验，不参与模型参数派生"
+    }
+  },
+  "natural_history": {
+    "asymptomatic_fraction": 0.4,
+    "asymptomatic_days": 6.0,
+    "isolation_probability": 0.6,
+    "isolation_delay_days": 1.5,
+    "isolation_transmission_mult": 0.15,
+    "hospital_delay_days": 5.0,
+    "ward_days": 7.0,
+    "hospital_death_share": 0.7,
+    "untreated_death_mult": 2.0,
+    "infectivity_curve": [
+      [
+        -6.0,
+        0.05
+      ],
+      [
+        -3.0,
+        0.4
+      ],
+      [
+        -1.0,
+        0.9
+      ],
+      [
+        0.0,
+        1.0
+      ],
+      [
+        2.0,
+        0.8
+      ],
+      [
+        5.0,
+        0.4
+      ],
+      [
+        8.0,
+        0.1
+      ],
+      [
+        12.0,
+        0.0
+      ]
+    ],
+    "asymptomatic_infectivity_curve": [
+      [
+        0.0,
+        0.5
+      ],
+      [
+        2.0,
+        0.6
+      ],
+      [
+        5.0,
+        0.3
+      ],
+      [
+        8.0,
+        0.05
+      ],
+      [
+        10.0,
+        0.0
+      ]
+    ],
+    "age_ifr_relative": {
+      "0-9": 0.002,
+      "10-19": 0.002,
+      "20-29": 0.01,
+      "30-39": 0.03,
+      "40-49": 0.08,
+      "50-59": 0.2,
+      "60-69": 0.4,
+      "70-79": 0.7,
+      "80+": 1.0
+    },
+    "age_hospitalization_relative": {
+      "0-9": 0.02,
+      "10-19": 0.03,
+      "20-29": 0.08,
+      "30-39": 0.15,
+      "40-49": 0.3,
+      "50-59": 0.5,
+      "60-69": 0.8,
+      "70-79": 1.0,
+      "80+": 1.2
+    },
+    "age_susceptibility": {
+      "0-9": 0.4,
+      "10-19": 0.7,
+      "20-29": 1.0,
+      "30-39": 1.0,
+      "40-49": 1.0,
+      "50-59": 1.0,
+      "60-69": 1.05,
+      "70-79": 1.1,
+      "80+": 1.15
+    }
+  },
+  "medical": {
+    "beds_per_1000": 3.0,
+    "n_hospitals_per_100k": 10
+  },
+  "model_parameters": {
+    "r0_calibration_factor": 1.0,
+    "transmit_base_prob": 0.08,
+    "transmit_beta_exponent": 1.5,
+    "immunity_gain_per_infection": 0.6,
+    "immunity_effectiveness": 3,
+    "immunity_waning_threshold": 0.1,
+    "incubation_self_recovery_rate": 0.0,
+    "mutation": {
+      "enabled": false,
+      "rate": 0.0,
+      "scale": 0.15,
+      "bounds": {
+        "beta": [
+          1e-06,
+          1.0
+        ],
+        "gamma": [
+          1e-06,
+          0.05
+        ],
+        "mu": [
+          1e-06,
+          0.15
+        ]
+      }
+    }
+  },
+  "sources": {
+    "lauer2020": {
+      "citation": "Lauer SA et al. The Incubation Period of Coronavirus Disease 2019 (COVID-19) From Publicly Reported Confirmed Cases: Estimation and Application. Ann Intern Med. 2020;172(9):577-582.",
+      "doi": "10.7326/M20-0504",
+      "pmcid": "PMC7081172",
+      "pmid": "32150748",
+      "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC7081172/",
+      "accessed": "2026-10-31"
+    },
+    "he2020": {
+      "citation": "He X et al. Temporal dynamics in viral shedding and transmissibility of COVID-19. Nat Med. 2020;26(5):672-675.",
+      "doi": "10.1038/s41591-020-0869-5",
+      "pmid": "32296168",
+      "url": "https://www.nature.com/articles/s41591-020-0869-5",
+      "accessed": "2026-10-31"
+    },
+    "bobrovitz2023": {
+      "citation": "Bobrovitz N et al. Protective effectiveness of previous SARS-CoV-2 infection and hybrid immunity against the omicron variant and severe disease: a systematic review and meta-regression. Lancet Infect Dis. 2023;23(5):556-567.",
+      "doi": "10.1016/S1473-3099(22)00801-5",
+      "pmid": "36681084",
+      "pmcid": "PMC10014083",
+      "url": "https://www.thelancet.com/journals/laninf/article/PIIS1473-3099(22)00801-5/fulltext",
+      "accessed": "2026-10-31"
+    },
+    "verity2020": {
+      "citation": "Verity R et al. Estimates of the severity of coronavirus disease 2019: a model-based analysis. Lancet Infect Dis. 2020;20(6):669-677.",
+      "doi": "10.1016/S1473-3099(20)30243-7",
+      "url": "https://www.thelancet.com/journals/laninf/article/PIIS1473-3099(20)30243-7/fulltext",
+      "accessed": "2026-10-31",
+      "note": "全文页面受限；数值按文献摘要采用（总体 IFR 0.66%，95% CrI 0.39-1.33%），年龄相对形状为机制性近似"
+    },
+    "liu2020": {
+      "citation": "Liu Y, Gayle AA, Wilder-Smith A, Rocklöv J. The reproductive number of COVID-19 is higher compared to SARS coronavirus. J Travel Med. 2020;27(2):taaa021.",
+      "doi": "10.1093/jtm/taaa021",
+      "url": "https://academic.oup.com/jtm/article/27/2/taaa021/5735319",
+      "accessed": "2026-10-31",
+      "note": "汇总早期 R0 估计，均值约 3.28；本档案取 3.0"
+    },
+    "owid_who": {
+      "citation": "Our World in Data: Hospital beds per 1,000 people (WHO / World Bank WDI, SH.MED.BEDS.ZS, 1960-2023).",
+      "url": "https://ourworldindata.org/grapher/hospital-beds-per-1000-people",
+      "accessed": "2026-10-31"
+    },
+    "who_cdc": {
+      "citation": "WHO / CDC / China CDC 关于 COVID-19 住院比例与临床严重性的公开口径（症状者约 5-12% 需住院）。",
+      "url": "https://www.who.int/",
+      "accessed": "2026-10-31",
+      "note": "不同国家/年龄段差异大；用于住院率均值与年龄相对形状，不用于个体结局"
+    }
+  },
+  "notes": [
+    "所有流行病学数值都是 2020 年祖先株的近似，不代表当前流行株（Omicron 免疫逃逸/毒力不同）。",
+    "无症状路径：E→A 比例 40%，A 不死亡、不隔离，传染力约为有症状峰值的 0.5-0.6；有症状路径才进入隔离/住院/死亡。",
+    "有症状隔离：发病时以 60% 概率决定隔离，1.5 天后居家、非家庭传播乘子 0.15；隔离者仍可在家庭内传播。",
+    "住院：发病 5 天后按年龄别住院率入院（均值 8%），床位 3/1000；床位满则留家 untreated，死亡风险按「住院疗程死亡风险×2.0」计算（≈19%，高于普通社区病程），有空床后按等待顺序补入。",
+    "死亡按 hospital_death_share=0.7 拆分到住院路径，其余在社区路径；无挤兑时总体死亡/感染约 0.66%，床位挤兑时 untreated 路径产生超额死亡。",
+    "时变传染力：以症状出现为 0 天，-6..+12 天分段线性；loader 对曲线做数值积分推导 beta，并输出症状前传播比例与有效传染期。",
+    "年龄别严重性用相对表（Verity 形状）在初始化时按实际人口年龄分布归一化，保证总体 IFR/住院率与档案一致；易感性相对表也归一化为均值 1，不改变 R0。",
+    "无疫苗、变异免疫逃逸、检测-追踪隔离、口罩/学校关闭；这些留待后续版本。",
+    "1 帧 = 6 分钟（活动节律），疾病时长按天换算为帧；无真实地理/密度校准。",
+    "每帧有效接触数 C 取活动模型实测值 24.6（夜间≈17、工作时段≈85-99、日平均≈25），见 disease_profiles.CONTACT_RATE_PER_FRAME。",
+    "初始 20 例/万人：默认模型按「工作场所 0 的就业者」播种（情景设定，便于观察暴发）；profile_check 的经验校准会改为随机分散种子，避免播种方式污染 R0 估计。",
+    "本档案 mutation.enabled=false：祖先株不模拟抗原漂移；若开启，bounds 已放宽到覆盖派生 beta/gamma/mu。",
+    "社会响应层（v3）：有症状者在发病后按 60% 概率预约检测、平均 1.5 天后出结果（灵敏度 90%），每日检测能力 800/10 万；阳性者按 80% 依从隔离（延迟 0.5 天），隔离者非家庭传播乘子沿用 natural_history.isolation_transmission_mult。",
+    "追踪：阳性者以 60% 概率触发追踪，延迟 1 天；家庭接触者全部、工作/学校场所接触者按 25% 比例被隔离 10 天（依从 80%），期间居家且传播乘子 0.5。",
+    "行为反馈：以 7 天报告发病率（每 10 万）相对阈值 20/10 万的 sigmoid 响应（强度 0.35），响应延迟 7 天并随 90 天疲劳衰减；只降低休闲接触与出行，最小乘子 0.2。",
+    "报告层：有症状者按 50% 比例在 3 天后被报告，标题的 Rep 为累计报告数；报告关闭时不消耗随机数，v2 行为不受影响。"
+  ]
+}
