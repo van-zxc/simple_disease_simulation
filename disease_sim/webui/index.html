@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Virus Evolution CA · 疫情仪表盘</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <header id="topbar">
+    <h1>Virus Evolution CA with Immunity System</h1>
+    <div id="profile">正在连接仿真…</div>
+    <div id="conn">连接中…</div>
+  </header>
+
+  <main>
+    <!-- 左：城市地图 -->
+    <section id="mapPanel">
+      <canvas id="map"></canvas>
+      <div id="mapOverlay">
+        <div id="timeLine">Day —  --:--</div>
+        <div id="mapStats"></div>
+      </div>
+      <button id="lockBtn" type="button" title="切换封控（Lockdown）">LOCKDOWN 封控</button>
+      <div id="legend"></div>
+    </section>
+
+    <!-- 右：读数 + 曲线 -->
+    <aside id="side">
+      <section class="panel" id="kpiPanel">
+        <h2>关键指标 <span class="en">Key indicators</span><span class="hint" id="kpiHint"></span></h2>
+        <div id="kpiGrid"></div>
+      </section>
+
+      <section class="panel chartPanel">
+        <h2>活跃感染 <span class="en">Active infections</span><span class="hint">纵轴自动缩放 · 最近 500 帧</span></h2>
+        <canvas id="chartActive"></canvas>
+      </section>
+
+      <section class="panel chartPanel">
+        <h2>人群池 <span class="en">Population pools</span><span class="hint">纵轴自动缩放 · 最近 500 帧</span></h2>
+        <canvas id="chartPools"></canvas>
+      </section>
+
+      <section class="panel chartPanel">
+        <h2>病毒传播与免疫 <span class="en">Transmission &amp; immunity</span><span class="hint">左 β · 右 平均免疫</span></h2>
+        <canvas id="chartVirus"></canvas>
+      </section>
+
+      <section class="panel chartPanel">
+        <h2>病毒致死与代际 <span class="en">Virulence &amp; generation</span><span class="hint">左 μ(‰) · 右 代际</span></h2>
+        <canvas id="chartDeath"></canvas>
+      </section>
+
+      <section class="panel chartPanel">
+        <h2>再感染 <span class="en">Reinfections</span><span class="hint">最近 50 帧窗口 · 最近 500 帧</span></h2>
+        <canvas id="chartReinf"></canvas>
+      </section>
+    </aside>
+  </main>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
