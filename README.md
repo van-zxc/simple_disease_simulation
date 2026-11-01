@@ -22,6 +22,7 @@ pip install torch matplotlib numpy
 python simple_disease_simulation.py                                        # 默认 covid19 档案（v4，机制全开）
 python simple_disease_simulation.py --profile toy                          # 旧 v1 路径，快速出图
 python simple_disease_simulation.py --profile covid19 --population 100000 --seed 7
+python simple_disease_simulation.py --initial-seeds 200                   # 固定 200 个初始感染者（不随人口缩放）
 python simple_disease_simulation.py --frames 3000                          # 等价 SIM_FRAMES=3000
 ```
 
@@ -35,10 +36,10 @@ python simple_disease_simulation.py --frames 3000                          # 等
 | `--population N` | `DISEASE_POPULATION` | 人口规模（自动按 √r 缩放面积、按 r 缩放场所数） | 配置内 `N_AGENTS` |
 | `--seed N` | `DISEASE_SEED` | 随机种子 | 42 |
 | `--frames N` | `SIM_FRAMES` | 运行帧数（1 帧 = 6 分钟，240 帧/天） | 配置内 `FRAMES` |
+| `--initial-seeds N` | `DISEASE_INITIAL_SEEDS` | **初始感染人数的绝对值**（不随人口缩放，`0` = 零初始感染；对应配置项 `INITIAL_SEEDS_ABSOLUTE`） | 档案 `population.initial_seeds` × 人口/10000 |
 | `--render-every K` | `SIM_RENDER_EVERY` | 每 K 帧重绘一次（模型仍逐帧推进） | `1` |
 | `--async-render [K]` | — | 异步渲染快捷方式（等价 `--render-every K`，默认 2） | — |
 | — | `SIM_RENDER_POINTS` | 散点抽样上限（限制大人口下的绘制成本） | `10000` |
-| — | `DISEASE_INITIAL_SEEDS` | **初始感染人数的绝对值**（不随人口缩放，`0` = 零初始感染；对应配置项 `INITIAL_SEEDS_ABSOLUTE`） | 档案 `population.initial_seeds` × 人口/10000 |
 | — | `CONTACT_MODE` | `auto` / `dense` / `grid` 接触对算法 | `auto` |
 
 内置档案：`covid19`（默认）、`covid19_homogeneous`（同质对照）、`covid19_v2_noiv`

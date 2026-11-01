@@ -4,6 +4,7 @@
 
     python simple_disease_simulation.py
     python simple_disease_simulation.py --profile covid19 --population 100000 --seed 42
+    python simple_disease_simulation.py --population 100000 --initial-seeds 200
 
 分析工具（``tools/``）会加载本文件并读取模块级名字（``update`` / ``status`` /
 ``CONFIG`` 等），所以这里保留一层很薄的属性转发；仿真逻辑一律在包里。
@@ -23,7 +24,9 @@ if str(_PROJECT_DIR) not in sys.path:
 def _apply_cli_overrides() -> None:
     """把 CLI 参数翻译成包内环境变量；只在直接执行本文件时生效。
 
-    支持 ``--population`` / ``--seed`` / ``--frames``（含 ``=`` 写法）。
+    支持 ``--population`` / ``--seed`` / ``--frames`` / ``--initial-seeds``（含 ``=`` 写法）。
+    ``--initial-seeds`` 是**绝对人数**（不随人口缩放，``0`` = 零初始感染），对应
+    ``CONFIG["INITIAL_SEEDS_ABSOLUTE"]``。
     只有 ``sys.argv[0]`` 是本文件时才解析——工具加载本模块时 argv 属于工具，
     把它的 flag 当模拟参数会污染配置。
     """
@@ -34,6 +37,7 @@ def _apply_cli_overrides() -> None:
         "--population": "DISEASE_POPULATION",
         "--seed": "DISEASE_SEED",
         "--frames": "SIM_FRAMES",
+        "--initial-seeds": "DISEASE_INITIAL_SEEDS",
     }
     args = argv[1:]
     for index, arg in enumerate(args):
