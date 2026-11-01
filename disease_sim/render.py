@@ -40,15 +40,23 @@ def build_render(sim) -> None:
     sim.ax_main.set_title('Virus Evolution CA with Immunity System', fontsize=14, fontweight='bold')
 
     # 场所标记：静态 artist，只绘制一次（不参与 blit 重绘，也不在 update 返回值里）
-    # marker 用形状区分四类场所，s=64 保证小图上也看得清
+    # marker 用形状区分四类场所；点的大小按"该场馆的占用人数"缩放（人能装多少，点就多大），
+    # 这样 1M 人口下不会出现 2000 个同样大小的实心方块糊成一片，工作/学校之间的规模差异
+    # 也肉眼可见。基准 208 人（10k 基准下每个工作场所的平均在岗人数）对应 s=64。
+    _venue_occ = getattr(sim, "venue_occupancy", {})
     sim._venue_styles = [
-        ("Workplace", '#4C72B0', 's', sim.work_venue_np),
-        ("School", '#8172B2', '^', sim.school_venue_np),
-        ("Shop", '#DD8452', 'o', sim.shop_venue_np),
-        ("Park", '#55A868', 'P', sim.park_venue_np),
+        ("Workplace", '#4C72B0', 's', sim.work_venue_np, _venue_occ.get("work")),
+        ("School", '#8172B2', '^', sim.school_venue_np, _venue_occ.get("school")),
+        ("Shop", '#DD8452', 'o', sim.shop_venue_np, _venue_occ.get("shop")),
+        ("Park", '#55A868', 'P', sim.park_venue_np, _venue_occ.get("park")),
     ]
-    for _vlabel, _vcolor, _vmarker, _varr in sim._venue_styles:
-        sim.ax_main.scatter(_varr[:, 0], _varr[:, 1], s=64, marker=_vmarker, c=_vcolor,
+    for _vlabel, _vcolor, _vmarker, _varr, _vpops in sim._venue_styles:
+        if _vpops is None:
+            _vsizes = 64.0
+        else:
+            _vsizes = np.clip(64.0 * np.sqrt(np.maximum(np.asarray(_vpops, dtype=float), 1.0) / 208.0),
+                              6.0, 300.0)
+        sim.ax_main.scatter(_varr[:, 0], _varr[:, 1], s=_vsizes, marker=_vmarker, c=_vcolor,
                         alpha=0.6, edgecolors='white', linewidths=0.5,
                         zorder=0.4, label=_vlabel)
     sim.ax_main.legend(loc='lower left', fontsize=7, framealpha=0.45)

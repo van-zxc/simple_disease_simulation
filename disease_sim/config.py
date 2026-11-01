@@ -27,7 +27,6 @@ _DEFAULTS = {
     "N_AGENTS": 10000, # 总人口数
     "WIDTH": 100.0, # 区域宽度
     "HEIGHT": 100.0, # 区域高度
-    "N_HOTSPOTS": 3, # 热点数量
     "INFECT_RADIUS": 1.8, # 感染距离阈值
     "BASE_TRANSMIT": 0.3, # 基础传播率
     "BASE_RECOVERY": 0.008, # 基础恢复率
@@ -56,8 +55,7 @@ _DEFAULTS = {
     "CHILD_SCHOOL_ENROLL": 0.95,       # 学龄儿童入学率
     "SCHOOL_MIN_AGE": 5,               # 最小入学年龄
     "HOUSEHOLD_SIZE_WEIGHTS": [0.18, 0.30, 0.22, 0.19, 0.11],  # 1-5 人户
-    "N_RESIDENTIAL_CLUSTERS": 12,      # 居住区中心数
-    "HOME_CLUSTER_STD": 10.0,          # 家庭锚点围绕居住区中心的散布
+    "HOME_CLUSTER_STD": 10.0,          # 家庭锚点围绕邻里中心的散布（物理常量，不随人口缩放）
     "HOME_JITTER_STD": 0.8,            # 同户成员的居住点抖动
     "WORK_START_MIN": 540,             # 09:00 上班
     "WORK_END_MIN": 1050,              # 17:30 下班
@@ -68,18 +66,40 @@ _DEFAULTS = {
     "ERRAND_START_MIN": 600,           # 10:00 起可出行
     "ERRAND_END_MIN": 1260,            # 21:00 前结束
     "ERRAND_DURATION_MIN": 90,         # 每次外出约 90 分钟
-    "N_WORKPLACES": 20,                # 工作场所数量
-    "N_SCHOOLS": 8,                    # 学校数量
-    "N_SHOPS": 12,                     # 商店数量
-    "N_PARKS": 6,                      # 公园数量
-    # 各类场所的散布半径（世界单位）：activity._spread_lut 取 work/school/shop 的 ×0.5
-    # 作为停留游走半径，park 只用于外出落点散布（errand_spread = park × 0.5）
+    "N_WORKPLACES": 20,                # 工作场所数量（随后按"就业人数/平均单位规模"推导覆盖）
+    "N_SCHOOLS": 8,                    # 学校数量（随后按"在校生/每校规模"推导覆盖）
+    "N_SHOPS": 12,                     # 商店数量（基准人口；随后按基础设施幂律缩放）
+    "N_PARKS": 6,                      # 公园数量（基准人口；随后按基础设施幂律缩放）
+    # 场所散布半径（世界单位）。现在**只有商店/公园**还用它：外出落点散布 =
+    # VENUE_SPREAD[kind] × 0.5（公园/商店任选其一）。工作/学校的停留散布改由
+    # "场馆占用人数 → σ_v"逐人给出（见 VENUE_DENSITY），work/school 两个值只为
+    # 旧接口 activity._spread_lut 的兼容保留，不再参与每帧计算。
     "VENUE_SPREAD": {"work": 8.0, "school": 8.0, "shop": 4.0, "park": 10.0},
     "TRIP_SPEED": 8.0,                 # 抽象速度：单位/帧
     "TRIP_MIN_FRAMES": 2,              # 最短出行帧数
     "TRIP_MAX_FRAMES": 12,             # 最长出行帧数
     "LOCKDOWN_SHELTER": True,          # 封控时返家（False = 旧版原地冻结）
     "INITIAL_SEEDS": 20,               # 初始感染者数量（随后按人口比例缩放）
+
+    # ---- 城市结构（多中心 / 职住分离 / 规模不变性；现实依据见 REALISM.md §3）----
+    # 下列键只决定"谁在哪"，不改变人均密度：人口放大时城区数亚线性增长（城市规模效应），
+    # 邻里数与人口成正比，场馆内落点散布由"占用人数/场馆密度"反推（所以换布局不改接触率）。
+    "N_DISTRICTS_BASE": 12,            # 基准人口（10k）的城区数（= 旧布局的 12 个中心，保持基准病例的接触结构可比）
+    "DISTRICT_COUNT_EXPONENT": 0.5,    # 区数 ∝ 人口^该指数（亚线性：大城市平均"更大"而非更多）
+    "DISTRICT_GRID_JITTER": 0.35,      # 区中心的分层网格抖动（格宽比例，0=规则栅格）
+    "DISTRICT_EMPLOYMENT_ALPHA": 1.0,  # 就业规模分布：w_k ∝ 1/rank^α（Zipf 重尾）
+    "DISTRICT_RESIDENTIAL_BASE": 0.6,  # 住宅权重 v_k ∝ base + spread·w_k（就业中心也住人）
+    "DISTRICT_RESIDENTIAL_SPREAD": 0.8,
+    "COMMUTE_DECAY": 0.5,              # 通勤距离衰减长度 = 该值 × 世界边长（引力模型）
+    "NEIGHBORHOOD_POP": 833,           # 每个居住邻里的人口 → 邻里数 = N / 该值（基准=12）
+    "SCHOOL_SIZE": 500,                # 每所学校在校生（NCES 2023-24 均值量级）→ 学校数 = 在校生/该值
+    "WORKPLACE_MEAN_JOBS": 20,         # 平均每单位岗位数（Census SUSB 均值量级）→ 单位数 = 就业人数/该值
+    "WORKPLACE_SIZE_SIGMA": 1.0,       # 单位岗位规模的对数正态 σ（重尾：多数小单位 + 少数大单位）
+    # 场馆核心密度（人/单位²）：用于把"占用人数"换成场馆停留散布
+    # σ_v = √(n_v / (2π·ρ_k))——人数 ∝ 面积，从而单帧接触数对人口规模近似不变（见 REALISM.md §3）
+    "VENUE_DENSITY": {"work": 16.0, "school": 6.0, "shop": 0.84, "park": 0.09},
+    "ERRAND_LOCAL_SHARE": 0.85,        # 外出时去"本区最近场馆"的比例（0=全城均匀抽签）
+    "INFRA_COUNT_EXPONENT": 0.85,      # 商店/公园数 ∝ 人口^该指数（基础设施亚线性，Bettencourt 2007）
 
     # ---- 疾病参数（由 diseases/*.json 档案覆盖；此处是缺省/回归值）----
     "FRAMES": 5000,                    # 模拟总帧数（疾病档案可覆盖；环境变量 SIM_FRAMES 优先）
@@ -236,14 +256,30 @@ def _apply_population_scale() -> None:
     # 世界边长按 √r 放大：保持单位面积人口密度与基准一致
     CONFIG["WIDTH"] = CONFIG["WIDTH"] * _area_scale
     CONFIG["HEIGHT"] = CONFIG["HEIGHT"] * _area_scale
-    # 场所数按人口比例放大，保证人均场所数与基准一致（至少 1 个）
-    CONFIG["N_WORKPLACES"] = max(1, int(round(CONFIG["N_WORKPLACES"] * _SCALE)))
-    CONFIG["N_SCHOOLS"] = max(1, int(round(CONFIG["N_SCHOOLS"] * _SCALE)))
-    CONFIG["N_SHOPS"] = max(1, int(round(CONFIG["N_SHOPS"] * _SCALE)))
-    CONFIG["N_PARKS"] = max(1, int(round(CONFIG["N_PARKS"] * _SCALE)))
-    # 至少 4 个居住区中心：人口很小时也要保留多中心聚集结构
-    CONFIG["N_RESIDENTIAL_CLUSTERS"] = max(
-        4, int(round(CONFIG["N_RESIDENTIAL_CLUSTERS"] * _SCALE)))
+    # 工作单位数按"就业人数 / 平均单位规模"推导（不再 ∝人口）：真实城市的单位规模近似
+    # 与城市规模无关（Census SUSB 均值约 17–20 人/单位），所以单位数随就业人数线性增长。
+    _employed_est = (POPULATION
+                     * max(0.0, 1.0 - CONFIG["AGE_CHILD_FRAC"] - CONFIG["AGE_ELDER_FRAC"])
+                     * CONFIG["ADULT_EMPLOYMENT"])
+    CONFIG["N_WORKPLACES"] = max(2, int(round(_employed_est / CONFIG["WORKPLACE_MEAN_JOBS"])))
+    # 商店/公园数按基础设施的亚线性幂律增长（人均商业/绿地随城市规模略降）
+    _infra_scale = _SCALE ** CONFIG["INFRA_COUNT_EXPONENT"]
+    CONFIG["N_SHOPS"] = max(1, int(round(CONFIG["N_SHOPS"] * _infra_scale)))
+    CONFIG["N_PARKS"] = max(1, int(round(CONFIG["N_PARKS"] * _infra_scale)))
+    # 城区数亚线性增长：大城市是"更大的城市"而不是"更多的城市"
+    # （真实城市的基础设施/中心数随人口近似 β≈0.85 的幂律增长，这里用 √ 级更保守，
+    #   目的是避免大人口下又退化成少数几个巨大团块）
+    CONFIG["N_DISTRICTS"] = max(
+        int(CONFIG["N_DISTRICTS_BASE"]),
+        int(round(CONFIG["N_DISTRICTS_BASE"]
+                  * _SCALE ** CONFIG["DISTRICT_COUNT_EXPONENT"])))
+    # 居住邻里数：每 NEIGHBORHOOD_POP 人一个邻里（基准 10000/833 = 12，与旧布局一致）
+    CONFIG["N_NEIGHBORHOODS"] = max(4, int(round(POPULATION / CONFIG["NEIGHBORHOOD_POP"])))
+    # 学校数：按在校生数估（儿童占比 × 学龄占比 × 入学率）再除每校规模
+    _school_age_share = max(0.0, 1.0 - CONFIG["SCHOOL_MIN_AGE"] / 18.0)
+    _students_est = (POPULATION * CONFIG["AGE_CHILD_FRAC"] * _school_age_share
+                     * CONFIG["CHILD_SCHOOL_ENROLL"])
+    CONFIG["N_SCHOOLS"] = max(1, int(round(_students_est / CONFIG["SCHOOL_SIZE"])))
     # 场所散布半径随世界尺寸放大，使多个场所之间的间距/密度与基准一致
     CONFIG["VENUE_SPREAD"] = {k: v * _area_scale for k, v in CONFIG["VENUE_SPREAD"].items()}
     # 通勤速度随尺度放大，使出行帧数分布与基准一致
@@ -258,7 +294,10 @@ def _apply_population_scale() -> None:
             1, int(round(CONFIG["N_HOSPITALS_PER_100K"] * POPULATION / 100000.0)))
     print(f"Population: {POPULATION} (x{_SCALE:.1f}), "
           f"world: {CONFIG['WIDTH']:.1f}x{CONFIG['HEIGHT']:.1f}, "
+          f"districts: {CONFIG['N_DISTRICTS']}, "
+          f"neighborhoods: {CONFIG['N_NEIGHBORHOODS']}, "
           f"workplaces: {CONFIG['N_WORKPLACES']}, schools: {CONFIG['N_SCHOOLS']}, "
+          f"shops: {CONFIG['N_SHOPS']}, parks: {CONFIG['N_PARKS']}, "
           f"medical threshold: {CONFIG['MEDICAL_THRESHOLD']}")
 
 

@@ -45,6 +45,136 @@ def _clip_world(pos: np.ndarray, margin: float, w: float, h: float) -> np.ndarra
     ))
 
 
+# ==================== 城市结构：城区 / 邻里 / 场所选址 ====================
+# 这些函数只决定"谁在哪"，不决定"多少人"：人口/密度由 _apply_population_scale 负责。
+# 现实城市的三条结构规则在这里落地（详见 REALISM.md §3）：
+#   1) 多中心且规模重尾：区数随人口亚线性增长，各区的就业规模服从 Zipf；
+#   2) 职住分离：住在哪决定通勤去哪（距离衰减的引力模型），不是全国均匀抽签；
+#   3) 规模不变性：场馆内的落点散布 σ_v 由"占用人数 / 场馆密度"反推，人数 ∝ 面积，
+#      所以换个布局不会悄悄改掉单帧接触数（这是 R0 标定的前提）。
+# 所有抽样都用 numpy rng，且顺序固定（同 seed ⇒ 同布局）。
+
+
+def _stratified_centers(rng: np.random.Generator, w: float, h: float, count: int,
+                        jitter: float, margin: float) -> np.ndarray:
+    """分层抖动网格：count 个中心近似铺满世界，各自在网格单元内随机抖动。
+
+    为什么不用纯均匀随机：会成团并留下大片空洞；为什么不用规则栅格：看起来太"人造"。
+    城区中心用它（城市在地域上分散），公园也用它（公园填城区之间的开阔地）。
+    """
+    side = max(1, int(np.ceil(np.sqrt(count))))
+    cell_w = (w - 2.0 * margin) / side
+    cell_h = (h - 2.0 * margin) / side
+    gx, gy = np.meshgrid(np.arange(side, dtype=float), np.arange(side, dtype=float))
+    cells = np.column_stack(((gx.ravel() + 0.5) * cell_w + margin,
+                             (gy.ravel() + 0.5) * cell_h + margin))
+    pick = rng.permutation(cells.shape[0])[:count]
+    offsets = rng.normal(0.0, 1.0, (count, 2)) * np.array([cell_w, cell_h]) * float(jitter)
+    return _clip_world(cells[pick] + offsets, margin, w, h)
+
+
+def _zipf_weights(rng: np.random.Generator, count: int, alpha: float) -> np.ndarray:
+    """规模重尾权重 w_k ∝ 1/rank^α，再随机分配到各中心（规模与空间位置无关）。"""
+    ranks = np.arange(1, count + 1, dtype=float)
+    weights = 1.0 / ranks ** max(0.0, float(alpha))
+    weights /= weights.sum()
+    return rng.permutation(weights)
+
+
+def _allocate_counts(total: int, weights: np.ndarray) -> np.ndarray:
+    """把 total 个场所按权重分到各区（最大余数法；总数严格等于 total）。"""
+    raw = weights * total
+    counts = np.floor(raw).astype(np.int64)
+    order = np.argsort(-(raw - counts), kind="stable")
+    i = 0
+    while counts.sum() < total and i < 4 * total + counts.size:
+        counts[order[i % counts.size]] += 1
+        i += 1
+    while counts.sum() > total:
+        j = int(np.argmax(counts))
+        if counts[j] <= 0:
+            break
+        counts[j] -= 1
+    return counts
+
+
+def _build_districts(rng: np.random.Generator, sim) -> tuple[np.ndarray, np.ndarray,
+                                                             np.ndarray, np.ndarray]:
+    """构造城区：分层抖动网格的多中心 + 就业 Zipf 权重 + 住宅权重 + 容纳半径。"""
+    margin = sim.W * 0.1
+    count = int(CONFIG["N_DISTRICTS"])
+    pos = _stratified_centers(rng, sim.W, sim.H, count,
+                              CONFIG["DISTRICT_GRID_JITTER"], margin)
+    jobs_w = _zipf_weights(rng, count, CONFIG["DISTRICT_EMPLOYMENT_ALPHA"])
+    res_w = (CONFIG["DISTRICT_RESIDENTIAL_BASE"]
+             + CONFIG["DISTRICT_RESIDENTIAL_SPREAD"] * jobs_w)
+    res_w = res_w / res_w.sum()
+    # 容纳半径：住宅权重 × 基准密度下需要的面积（√(v·A/π)），决定邻里与场所的散开范围
+    radius = np.sqrt(res_w * sim.W * sim.H / np.pi)
+    sim.district_pos = torch.tensor(pos, dtype=torch.float32, device=device)
+    sim.district_jobs_w = torch.tensor(jobs_w, dtype=torch.float32, device=device)
+    sim.district_res_w = torch.tensor(res_w, dtype=torch.float32, device=device)
+    sim.district_radius = torch.tensor(radius, dtype=torch.float32, device=device)
+    return pos, jobs_w, res_w, radius
+
+
+def _build_neighborhoods(rng: np.random.Generator, sim, district_pos: np.ndarray,
+                         district_res_w: np.ndarray,
+                         district_radius: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """构造居住邻里：在世界内近似均匀铺开，每个邻里归属最近的城区。
+
+    为什么不在城区内部聚成小团：人均居住面积是"密度→接触率→R0"标定的前提，
+    把邻里全部塞进城区圆盘会让居住密度成倍上升（实测 10k 下 home 段接触数从 16.7 涨到
+    31.6）。所以邻里仍是全城铺开（与旧布局的 12 个居住簇同口径），只是加上"归属哪个城区"
+    的信息，供通勤引力使用；城区规模差异体现在"住哪儿去哪个中心上班"。
+    """
+    count = int(CONFIG["N_NEIGHBORHOODS"])
+    margin = sim.W * 0.1
+    center = _clip_world(np.column_stack((
+        rng.uniform(margin, sim.W - margin, count),
+        rng.uniform(margin, sim.H - margin, count))), 2.0, sim.W, sim.H)
+    nb_district = np.argmin(
+        np.linalg.norm(center[:, None, :] - district_pos[None, :, :], axis=2), axis=1)
+    sim.neighborhood_center = torch.tensor(center, dtype=torch.float32, device=device)
+    sim.nb_district = torch.tensor(nb_district, dtype=torch.long, device=device)
+    return center, nb_district
+
+
+def _venues_around_districts(rng: np.random.Generator, sim, count: int,
+                             weights: np.ndarray, district_pos: np.ndarray,
+                             district_radius: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """按权重把 count 个场所分到各区，区内用黄金角螺旋（蓝噪声）铺开。
+
+    为什么不是"高斯撒在区中心附近"：场馆一多（大人口档位）就会全堆到区中心，
+    区内的行人云互相重叠，接触数随人口单调上升（实测 1M 的 work 段比 10k 高 46%）。
+    螺旋让"单位面积内的场馆数"与基准一致，接触率才对人口规模不敏感。
+    """
+    counts = _allocate_counts(count, weights)
+    district_of = np.repeat(np.arange(weights.size), counts)
+    pos = np.empty((count, 2), dtype=float)
+    _golden = np.pi * (3.0 - np.sqrt(5.0))   # ≈2.39996 rad，黄金角
+    _start = 0
+    for _k, _n in enumerate(counts):
+        if _n == 0:
+            continue
+        _idx = np.arange(_n, dtype=float)
+        # 区内半径按 √(i/n) 递增：等价于圆盘内面积均匀（Vogel 螺旋），最外圈留 10% 余量
+        _r = (district_radius[_k] * 0.9 * np.sqrt((_idx + 0.5) / _n)
+              if _n > 1 else np.zeros(1))
+        _theta = _idx * _golden + rng.uniform(0.0, 2.0 * np.pi)
+        pos[_start:_start + _n, 0] = district_pos[_k, 0] + np.cos(_theta) * _r
+        pos[_start:_start + _n, 1] = district_pos[_k, 1] + np.sin(_theta) * _r
+        pos[_start:_start + _n] += rng.normal(
+            0.0, 0.05 * float(district_radius[_k]), (_n, 2))
+        _start += _n
+    return _clip_world(pos, 1.5, sim.W, sim.H), district_of
+
+
+def _venue_sigma(occupancy: np.ndarray, density: float) -> np.ndarray:
+    """场馆内落点散布 σ_v = √(n_v / (2π·ρ))：人数 ∝ 面积 ⇒ 单帧接触数不随人口放大而变。"""
+    return np.sqrt(np.maximum(occupancy, 1.0) / (2.0 * np.pi * max(float(density), 1e-9)))
+
+
 def build_state() -> SimState:
     """构造整局仿真的初始状态：人口/家庭/场所、初始免疫与种子、以及各开关层的占位字段。
 
@@ -63,13 +193,10 @@ def build_state() -> SimState:
     # 结构只由 SEED 决定；torch 流的抽样顺序见下方 v4/初始免疫/日程抖动各段的 RNG 契约注释。
     rng = np.random.default_rng(int(SEED))
 
-    # ---- 活动中心：工作/学校场所的选址中心（双中心区域均匀撒点）----
-    # margin=10% 世界边长：让场所中心离边界留出余量，后面 venue 抖动/clamp 时少被推回。
+    # ---- 城市骨架：城区（多中心）+ 容纳半径 ----
+    # margin=10% 世界边长：让中心离边界留出余量，后面 venue 抖动/clamp 时少被推回。
     margin = sim.W * 0.1
-    activity_centers = np.column_stack((
-        rng.uniform(margin, sim.W - margin, CONFIG["N_HOTSPOTS"]),
-        rng.uniform(margin, sim.H - margin, CONFIG["N_HOTSPOTS"]),
-    ))
+    district_pos, district_jobs_w, district_res_w, district_radius = _build_districts(rng, sim)
 
     # ---- 家庭规模与人口结构（向量化，支持大规模人口）----
     # 不变式：sum(sizes)==sim.N 且 household_id 长度 == sim.N（所有按人张量都依赖这个长度）。
@@ -145,15 +272,14 @@ def build_state() -> SimState:
     enrolled_np = (_child_np & (age_np >= CONFIG["SCHOOL_MIN_AGE"]) &
                    (rng.random(sim.N) < CONFIG["CHILD_SCHOOL_ENROLL"]))
 
-    # ---- 家庭位置：先分居住区，再在簇中心附近撒家庭锚点，同户成员共享锚点 ----
+    # ---- 家庭位置：先按人口权重选邻里，再在邻里中心附近撒家庭锚点 ----
     # 聚集的意义：同户位置相近、户与户成簇，接触结构才有"社区"而不是均匀撒点。
-    _n_clusters = CONFIG["N_RESIDENTIAL_CLUSTERS"]
-    cluster_centers = np.column_stack((
-        rng.uniform(margin, sim.W - margin, _n_clusters),
-        rng.uniform(margin, sim.H - margin, _n_clusters),
-    ))
-    cluster_of_house = rng.integers(0, _n_clusters, n_households)
-    home_anchor_np = cluster_centers[cluster_of_house] + rng.normal(
+    # 邻里是"居住聚落"（人口 ≈ NEIGHBORHOOD_POP）；HOME_CLUSTER_STD 是物理常量（世界单位），
+    # 不随人口缩放：1M 人口下邻里仍是"小区"大小，只是一块地方有更多邻里，而不是糊成一团。
+    nb_center, nb_district = _build_neighborhoods(
+        rng, sim, district_pos, district_res_w, district_radius)
+    cluster_of_house = rng.integers(0, nb_center.shape[0], n_households)
+    home_anchor_np = nb_center[cluster_of_house] + rng.normal(
         0.0, CONFIG["HOME_CLUSTER_STD"], (n_households, 2))
     # 锚点先收回世界内（留 2.0 边距），避免与随后只留 1.5 边距的 home_pos 产生大偏差
     home_anchor_np = _clip_world(home_anchor_np, 2.0, sim.W, sim.H)
@@ -176,46 +302,106 @@ def build_state() -> SimState:
     sim.employed = torch.tensor(employed_np, dtype=torch.bool, device=device)
     sim.student = torch.tensor(enrolled_np, dtype=torch.bool, device=device)
 
-    # ---- 场所：工作/学校/商店/公园（数量来自 CONFIG，坐标落在活动中心附近）----
-    # 工作/学校场馆轮流挂到活动中心上（% N_HOTSPOTS），再各自抖动：场馆既聚集又不成单点。
-    # 0.5：把配置的场所"半径"折成坐标抖动的标准差（个人落点散布也用同一折算）。
+    # ---- 场所：工作/学校按区配置，商店贴邻里，公园填区际空隙 ----
+    # 布局规则（现实城市）：工作场所集中在各城区的就业中心附近；学校跟着学生住址所在区；
+    # 商店贴着居住区（步行可达）；公园是开阔地，铺在城区之间的空档里。
     n_work = CONFIG["N_WORKPLACES"]
     n_school = CONFIG["N_SCHOOLS"]
     sim.n_shop = CONFIG["N_SHOPS"]
     sim.n_park = CONFIG["N_PARKS"]
-    sim.work_venue_np = activity_centers[np.arange(n_work) % CONFIG["N_HOTSPOTS"]] + rng.normal(
-        0.0, CONFIG["VENUE_SPREAD"]["work"] * 0.5, (n_work, 2))
-    sim.school_venue_np = activity_centers[np.arange(n_school) % CONFIG["N_HOTSPOTS"]] + rng.normal(
-        0.0, CONFIG["VENUE_SPREAD"]["school"] * 0.5, (n_school, 2))
-    sim.shop_venue_np = np.column_stack((
-        rng.uniform(margin, sim.W - margin, sim.n_shop), rng.uniform(margin, sim.H - margin, sim.n_shop)))
-    sim.park_venue_np = np.column_stack((
-        rng.uniform(margin, sim.W - margin, sim.n_park), rng.uniform(margin, sim.H - margin, sim.n_park)))
-    sim.work_venue_np = _clip_world(sim.work_venue_np, 1.5, sim.W, sim.H)
-    sim.school_venue_np = _clip_world(sim.school_venue_np, 1.5, sim.W, sim.H)
-    work_venue = torch.tensor(sim.work_venue_np, dtype=torch.float32, device=device)
-    school_venue = torch.tensor(sim.school_venue_np, dtype=torch.float32, device=device)
+    sim.work_venue_np, work_district = _venues_around_districts(
+        rng, sim, n_work, district_jobs_w, district_pos, district_radius)
+    sim.school_venue_np, school_district = _venues_around_districts(
+        rng, sim, n_school, district_res_w, district_pos, district_radius)
+    # 商店挂到随机邻里，落在邻里中心 ±1.5×HOME_CLUSTER_STD（社区商业，不是全城均匀撒点）
+    shop_nb = rng.integers(0, nb_center.shape[0], sim.n_shop)
+    sim.shop_venue_np = _clip_world(
+        nb_center[shop_nb] + rng.normal(0.0, 1.0, (sim.n_shop, 2))
+        * (1.5 * CONFIG["HOME_CLUSTER_STD"]), 1.5, sim.W, sim.H)
+    sim.park_venue_np = _stratified_centers(
+        rng, sim.W, sim.H, sim.n_park, CONFIG["DISTRICT_GRID_JITTER"], margin)
+    sim.park_venue_np = _clip_world(sim.park_venue_np, 1.5, sim.W, sim.H)
+    sim.work_venue = torch.tensor(sim.work_venue_np, dtype=torch.float32, device=device)
+    sim.school_venue = torch.tensor(sim.school_venue_np, dtype=torch.float32, device=device)
     sim.shop_venue = torch.tensor(sim.shop_venue_np, dtype=torch.float32, device=device)
     sim.park_venue = torch.tensor(sim.park_venue_np, dtype=torch.float32, device=device)
 
-    # 均衡分配：就业成人 → 工作场所，在册儿童 → 学校；并给个人一个场所内落点。
-    # 用 permutation%n 分配而不是独立均匀抽签：每个场馆人数近似相等，避免大人口下场馆过载。
+    # ---- 本区就近的商业/绿地（外出"就近"用）----
+    # 每个邻里记住最近的商店/公园，逐人索引到自家邻里：不用 O(N×场所) 的最近邻搜索，
+    # 大人口下也只有 (邻里数 × 场所数) 的距离矩阵。
+    _shop_near = np.argmin(np.linalg.norm(
+        nb_center[:, None, :] - sim.shop_venue_np[None, :, :], axis=2), axis=1)
+    _park_near = np.argmin(np.linalg.norm(
+        nb_center[:, None, :] - sim.park_venue_np[None, :, :], axis=2), axis=1)
+    _nb_of_agent = cluster_of_house[household_id_np]
+    sim.local_shop_idx = torch.tensor(
+        _shop_near[_nb_of_agent], dtype=torch.long, device=device)
+    sim.local_park_idx = torch.tensor(
+        _park_near[_nb_of_agent], dtype=torch.long, device=device)
+
+    # ---- 职住分配：通勤距离衰减的引力模型 + 区内均衡 ----
+    # 引力模型：P(工作区 k | 居住区 h) ∝ w_k · exp(-d(h,k) / (COMMUTE_DECAY·W))。
+    # 现实依据：城市内出行服从引力模型（距离衰减），且就业规模重尾（Zipf）。
     emp_idx = np.where(employed_np)[0]
     stu_idx = np.where(enrolled_np)[0]
+    home_district_of_agent = nb_district[cluster_of_house[household_id_np]]
+    commute_len = max(float(CONFIG["COMMUTE_DECAY"]) * sim.W, 1.0)
+    district_dist = np.linalg.norm(district_pos[:, None, :] - district_pos[None, :, :], axis=2)
+
     # 不变式：无对应场所者索引为 -1（activity/contacts 用该哨兵判断"今天不去"）。
     work_idx_np = np.full(sim.N, -1, dtype=np.int64)
-    work_idx_np[emp_idx] = rng.permutation(emp_idx.size) % n_work
     school_idx_np = np.full(sim.N, -1, dtype=np.int64)
-    school_idx_np[stu_idx] = rng.permutation(stu_idx.size) % n_school
+
+    # 工作区抽样：先按引力概率建 (M,M) 行 cdf，再对每个就业者用一次 U(0,1) 做逆变换
+    _log_p = np.log(np.maximum(district_jobs_w, 1e-12))[None, :] - district_dist / commute_len
+    _has_work = np.bincount(work_district, minlength=district_jobs_w.size) > 0
+    _p = np.exp(_log_p - _log_p.max(axis=1, keepdims=True))
+    _p[:, ~_has_work] = 0.0                      # 没有工作场所的区不可选
+    _p /= _p.sum(axis=1, keepdims=True)
+    _cdf = np.cumsum(_p, axis=1)
+    _u = rng.random(emp_idx.size)
+    work_district_choice = (_cdf[home_district_of_agent[emp_idx]] < _u[:, None]).sum(axis=1)
+    # 区内按"单位规模"分配：单位岗位规模服从对数正态（大多数小单位 + 少量大单位），
+    # 员工按容量成比例落位。容量只改变"谁在哪家单位"，不改变场馆内的人均密度
+    # （σ_v 由实际占用人数反推），所以重尾不会破坏接触率标定。
+    _job_cap = rng.lognormal(mean=0.0, sigma=float(CONFIG["WORKPLACE_SIZE_SIGMA"]), size=n_work)
+    for _k in range(district_jobs_w.size):
+        _sel = emp_idx[work_district_choice == _k]
+        if _sel.size == 0:
+            continue
+        _venues_k = np.where(work_district == _k)[0]
+        _cap = _job_cap[_venues_k]
+        _cap_cdf = np.cumsum(_cap / _cap.sum())
+        _u_local = rng.random(_sel.size)
+        work_idx_np[_sel] = _venues_k[
+            np.minimum(np.searchsorted(_cap_cdf, _u_local, side="right"),
+                       _venues_k.size - 1)]
+
+    # 上学：本区学校优先；本区没有学校时按距离找最近的有学校的区（确定性，不抽签）
+    _has_school = np.bincount(school_district, minlength=district_jobs_w.size) > 0
+    _school_of_district = np.argmin(np.where(_has_school[None, :], district_dist, np.inf), axis=1)
+    school_district_choice = _school_of_district[home_district_of_agent[stu_idx]]
+    for _k in range(district_jobs_w.size):
+        _sel = stu_idx[school_district_choice == _k]
+        if _sel.size == 0:
+            continue
+        _venues_k = np.where(school_district == _k)[0]
+        school_idx_np[_sel] = _venues_k[rng.permutation(_sel.size) % _venues_k.size]
+
+    # 场馆占用人数 → 停留散布 σ_v（人数 ∝ 面积 ⇒ 单帧接触数对人口规模近似不变）
+    work_occ = np.bincount(work_idx_np[emp_idx], minlength=n_work).astype(float)
+    school_occ = np.bincount(school_idx_np[stu_idx], minlength=n_school).astype(float)
+    work_sigma = _venue_sigma(work_occ, CONFIG["VENUE_DENSITY"]["work"])
+    school_sigma = _venue_sigma(school_occ, CONFIG["VENUE_DENSITY"]["school"])
     work_pos_np = np.zeros((sim.N, 2))
-    # 个人在场所内的落点按场所尺度散布（工作/学校），而不是全部挤在场馆中心点上：
-    # 否则大人口下同一场馆会被压缩成一个"点"，接触对枚举会被局部高密度拖垮。
+    # 个人在场所内的落点按 σ_v 散布：既不是挤在场馆中心点上，也不随世界放大而散掉
+    # （旧实现按 VENUE_SPREAD×√area 散布，大人口下会散到接触半径之外，接触率被悄悄改掉）。
     # 非就业/非在册者的 work_pos/school_pos 只是被 clip 到 1.5 的占位坐标（-1 索引永不使用）。
     work_pos_np[emp_idx] = sim.work_venue_np[work_idx_np[emp_idx]] + rng.normal(
-        0.0, CONFIG["VENUE_SPREAD"]["work"] * 0.5, (emp_idx.size, 2))
+        0.0, 1.0, (emp_idx.size, 2)) * work_sigma[work_idx_np[emp_idx], None]
     school_pos_np = np.zeros((sim.N, 2))
     school_pos_np[stu_idx] = sim.school_venue_np[school_idx_np[stu_idx]] + rng.normal(
-        0.0, CONFIG["VENUE_SPREAD"]["school"] * 0.5, (stu_idx.size, 2))
+        0.0, 1.0, (stu_idx.size, 2)) * school_sigma[school_idx_np[stu_idx], None]
     work_pos_np = _clip_world(work_pos_np, 1.5, sim.W, sim.H)
     school_pos_np = _clip_world(school_pos_np, 1.5, sim.W, sim.H)
     # 调用方契约：work_pos/school_pos/work_venue_idx/school_venue_idx/shop_venue/park_venue
@@ -224,6 +410,27 @@ def build_state() -> SimState:
     sim.school_pos = torch.tensor(school_pos_np, dtype=torch.float32, device=device)
     sim.work_venue_idx = torch.tensor(work_idx_np, dtype=torch.long, device=device)
     sim.school_venue_idx = torch.tensor(school_idx_np, dtype=torch.long, device=device)
+
+    # 逐人停留半径（供 activity 的停留段按 place 取用；家仍固定 0.6）
+    work_spread_np = np.zeros(sim.N, dtype=np.float32)
+    work_spread_np[emp_idx] = work_sigma[work_idx_np[emp_idx]]
+    school_spread_np = np.zeros(sim.N, dtype=np.float32)
+    school_spread_np[stu_idx] = school_sigma[school_idx_np[stu_idx]]
+    sim.spread_home = torch.full((sim.N,), 0.6, device=device)
+    sim.spread_work = torch.tensor(work_spread_np, device=device)
+    sim.spread_school = torch.tensor(school_spread_np, device=device)
+
+    # 场馆占用规模（渲染点尺寸用；商店/公园按"同时在场期望人数"估：外出概率 × 时长占比）
+    _errand_share = (CONFIG["ERRAND_PROB_WEEKDAY"]
+                     * CONFIG["ERRAND_DURATION_MIN"] / CONFIG["DAY_FRAMES"])
+    _shop_occ = max(1.0, sim.N * _errand_share * 0.65 / max(1, sim.n_shop))
+    _park_occ = max(1.0, sim.N * _errand_share * 0.35 / max(1, sim.n_park))
+    sim.venue_occupancy = {
+        "work": work_occ,
+        "school": school_occ,
+        "shop": np.full(sim.n_shop, _shop_occ),
+        "park": np.full(sim.n_park, _park_occ),
+    }
 
     # ---- 个体状态：status 0..7（语义见 MECHANISMS.md §1 状态码表）----
     # 初始全 0=S；1(初始免疫)/2(E) 稍后由初始免疫与种子写入。统计按 status 取值，勿改状态码。
@@ -444,6 +651,10 @@ def build_state() -> SimState:
     sim.errand_start_min = torch.zeros(sim.N, device=device)
     sim.errand_kind = torch.zeros(sim.N, dtype=torch.long, device=device)   # 0=商店 1=公园
     sim.errand_pos = sim.home_pos.clone()
+    # 休闲停留半径的初值（日界 resample_daily_plan 会按当天目的商店/公园重写；这里给个
+    # 与商店口径一致的占位，保证首帧日界之前读不到未定义属性）
+    sim.errand_spread = torch.full((sim.N,), float(CONFIG["VENUE_SPREAD"]["shop"] * 0.5),
+                                   device=device)
     sim.mobility_stats = {'trip_starts': [], 'trip_durations': []}
     # -1 哨兵：首帧 day_index=0 必然 != _last_day，从而触发第一次日界重采样
     sim._last_day = -1

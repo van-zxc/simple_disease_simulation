@@ -40,6 +40,8 @@ def _spread_lut(sim):
     家固定 0.6；其余为 VENUE_SPREAD[kind] * 0.5（半场馆尺度，人不会飘出场馆太远）。
     不变式：CONFIG 要等档案应用 + 人口缩放后才定型，所以只能在首次使用时构建；缓存
     挂在 ``sim`` 上而不是模块级——不同 sim 可能对应不同档案/人口，不能跨 sim 复用。
+    注：停留段已改为逐人半径 ``_stay_spread``（场馆按占用人数定散布）；本 LUT 只保留给
+    外部脚本/兼容接口使用，不再参与每帧计算。
     """
     lut = getattr(sim, "_spread_lut", None)
     if lut is None:
@@ -60,6 +62,21 @@ def _place_spread(place_idx, lut=None):
     if lut is None:
         lut = _spread_lut_for(place_idx.device)
     return lut[place_idx]
+
+
+def _stay_spread(sim):
+    """逐人停留半径（停留段使用）：家 → 工作 → 学校 / 休闲，按 ``sim.place`` 现场选。
+
+    - 家：固定 0.6（与旧行为一致，同户成员不会散开）；
+    - 工作/学校：所在场馆的 ``σ_v``（state._venue_sigma 按"占用人数 / 场馆密度"反推），
+      场馆越大停留面越宽，人不会糊成一个点，也不会随世界放大而散到接触半径之外；
+    - 休闲：当天出门时采样的落点散布 ``sim.errand_spread``（商店/公园各一套）。
+    旧版用 ``VENUE_SPREAD × √世界`` 的全局 LUT，人口放大后会把接触率悄悄改掉。
+    """
+    return torch.where(
+        sim.place == 0, sim.spread_home,
+        torch.where(sim.place == 1, sim.spread_work,
+                    torch.where(sim.place == 2, sim.spread_school, sim.errand_spread)))
 
 
 def _spread_lut_for(dev):
@@ -108,8 +125,13 @@ def resample_daily_plan(sim, day_index):
     sim.errand_start_min = lo + torch.rand(sim.N, device=device) * (hi - lo)
 
     sim.errand_kind = (torch.rand(sim.N, device=device) < 0.35).long()  # 1 = 公园；0.35 是公园:商店的经验比例，非校准参数
+    # 就近外出：ERRAND_LOCAL_SHARE 的人去"自家邻里最近的商店/公园"（日常采买/遛弯是本地行为），
+    # 其余人才在全城场馆里均匀抽签（对应跨区购物/专程逛大公园）。RNG 契约：本函数第 4 次抽取。
+    _local_mask = torch.rand(sim.N, device=device) < float(CONFIG["ERRAND_LOCAL_SHARE"])
     shop_pick = torch.randint(0, sim.n_shop, (sim.N,), device=device)
     park_pick = torch.randint(0, sim.n_park, (sim.N,), device=device)
+    shop_pick = torch.where(_local_mask, sim.local_shop_idx, shop_pick)
+    park_pick = torch.where(_local_mask, sim.local_park_idx, park_pick)
     sim.errand_pos = torch.where(sim.errand_kind.unsqueeze(1).bool(),
                                  sim.park_venue[park_pick], sim.shop_venue[shop_pick])
     # 外出落点在场馆尺度内随机散布，避免大人口下商店/公园被压缩成"单点"；
@@ -117,6 +139,8 @@ def resample_daily_plan(sim, day_index):
     errand_spread = torch.where(sim.errand_kind.bool(),
                                 torch.tensor(CONFIG["VENUE_SPREAD"]["park"] * 0.5, device=device),
                                 torch.tensor(CONFIG["VENUE_SPREAD"]["shop"] * 0.5, device=device))
+    # 存到 sim 上：停留段要按"今天去了哪个场馆"取逐人半径（以前是局部变量，只能用全局 LUT）
+    sim.errand_spread = errand_spread
     sim.errand_pos = sim.errand_pos + torch.randn((sim.N, 2), device=device) * errand_spread.unsqueeze(1)
 
 
@@ -251,7 +275,7 @@ def advance_mobility(sim, frame, clock_min, day_index, alive=None):
     jitter = torch.randn((sim.N, 2), device=device) * 0.12
     walked = sim.pos + jitter
     rad = torch.norm(walked - target, dim=1)
-    allowed = _spread_lut(sim)[sim.place]
+    allowed = _stay_spread(sim)
     over = rad > allowed
     # 越界者沿"目标→新位置"方向投影回半径圆上（保留方向、不重置到中心，避免视觉跳变）
     fixed = (target
