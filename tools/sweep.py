@@ -12,7 +12,8 @@ nvidia-smi 的 util/功耗/显存采样）。
 口径陷阱：三个数不是一回事——`throughput_frames_per_s` 是稳态估计（Σ 1000/各 job
 中位帧耗时），`end_to_end_frames_per_s` 含进程加载与 warm，`per_job_per_frame_ms`
 才是单世界延迟。吞吐模式固定 `SIM_RENDER_EVERY=0`（纯计算），与 bench.py /
-render_prof.py 的渲染口径不可混报（SCALING.md §6.4–§6.5）。
+render_prof.py 的渲染口径不可混报（SCALING.md §6.4–§6.5）。子进程结果另带
+`frame_rates`（含 1% low / 0.1% low，定义见 tools/_stats.py）；父进程按各 job 取中位。
 """
 from __future__ import annotations
 
@@ -74,6 +75,12 @@ def child_main(args: argparse.Namespace) -> int:
         durations.append((time.perf_counter() - ft0) * 1000.0)
     wall = time.perf_counter() - t0
 
+    # 帧率分布 + 游戏式 1% low（最慢 1% 帧均值的倒数）：吞吐模式下每帧就是一次模型步进，
+    # 1% low 反映"卡顿帧"，与吞吐/延迟是三个不同口径（见模块 docstring）。
+    from _stats import frame_rate_stats  # noqa: E402  (延迟 import，避免父进程加载)
+
+    rates = frame_rate_stats(durations)
+
     # 末帧 counts 只作"各 job 同帧号状态是否同源"的参考；入口没暴露 status 时留 None，别中断。
     try:
         counts = [int(v) for v in torch.bincount(module.status, minlength=8).cpu().tolist()]
@@ -95,6 +102,9 @@ def child_main(args: argparse.Namespace) -> int:
         ),
         "per_frame_ms_min": round(min(durations), 3),
         "per_frame_ms_max": round(max(durations), 3),
+        "frame_rates": rates,
+        "one_percent_low_fps": (rates.get("one_percent_low") or {}).get("fps"),
+        "one_percent_low_ms": (rates.get("one_percent_low") or {}).get("mean_ms"),
         "counts_end": counts,
         "cuda_peak_mb": round(torch.cuda.max_memory_allocated() / 2**20, 2)
         if torch.cuda.is_available()
@@ -254,6 +264,7 @@ def run_one_batch(args: argparse.Namespace, jobs: int, seed_base: int) -> dict:
             results.append(payload)
 
     per_frame = [r["per_frame_ms_median"] for r in results]
+    low1 = [r["one_percent_low_fps"] for r in results if r.get("one_percent_low_fps")]
     # 稳态吞吐 = Σ(1/单世界帧耗时)：K 个世界各自跑完自己那帧的速率估计，不含加载/预热，
     # 所以总是高于 end_to_end（后者含进程启动 + warm，短跑时差距明显）。
     steady_throughput = sum(1000.0 / v for v in per_frame) if per_frame else 0.0
@@ -266,6 +277,7 @@ def run_one_batch(args: argparse.Namespace, jobs: int, seed_base: int) -> dict:
         "end_to_end_frames_per_s": round(len(results) * args.frames / wall, 2) if wall > 0 else 0.0,
         "per_job_per_frame_ms": [round(v, 2) for v in per_frame],
         "per_job_per_frame_ms_median": round(statistics.median(per_frame), 2) if per_frame else None,
+        "one_percent_low_fps_median": round(statistics.median(low1), 1) if low1 else None,
         "jobs_reporting": len(results),
         "gpu": gpu,
         "counts_end": [r.get("counts_end") for r in results],
@@ -291,6 +303,7 @@ def parent_main(args: argparse.Namespace) -> int:
         gpu = batch.get("gpu", {})
         print(
             f"  per-job {batch['per_job_per_frame_ms_median']} ms | "
+            f"1% low {batch.get('one_percent_low_fps_median')} fps | "
             f"吞吐 {batch['throughput_frames_per_s']:.1f} 帧/s "
             f"({batch['speedup_vs_single']:.2f}x) | util {gpu.get('util_mean_pct', '-')}% "
             f"| 功耗 {gpu.get('power_mean_w', '-')} W | 显存峰值 {gpu.get('mem_peak_mib', '-')} MiB",

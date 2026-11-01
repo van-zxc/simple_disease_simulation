@@ -12,7 +12,7 @@
 | 工具 | 回答什么问题 | 典型命令 |
 | --- | --- | --- |
 | `profile_check.py` | 档案数值是否自洽、经验 R0 是否合理 | `python tools/profile_check.py --profile covid19` |
-| `bench.py` | 单世界延迟/绘制/显存（`update` 含 sync，`draw` 为最坏口径） | `python tools/bench.py --profile covid19 --population 100000 --json benchmarks/b.json` |
+| `bench.py` | 单世界延迟/绘制/显存 + **平均帧率与 1% low**（`update` 含 sync，`draw` 为最坏口径） | `python tools/bench.py --profile covid19 --population 100000 --json benchmarks/b.json` |
 | `ab_iter.py` | **A/B 改动是否真的更快**（两进程交替，抗漂移） | `python tools/ab_iter.py --before _base/simple_disease_simulation.py --profile covid19 --json benchmarks/ab.json` |
 | `diag.py` | 瓶颈是 CPU 派发还是 GPU 算力 | `python tools/diag.py covid19 10000 42` |
 | `phase_probe.py` | 一帧时间花在 mobility / 接触对 / 内联段各多少 | `python tools/phase_probe.py simple_disease_simulation.py covid19 10000 200` |
@@ -23,6 +23,9 @@
 
 `_loader.py` 是共享加载器（Agg 打桩 + `spec_from_file_location` 加载入口），
 被其它脚本 `import _loader`；单独运行没有输出。
+`_stats.py` 是帧率统计（平均帧率、p95/p99 帧时、**1% low / 0.1% low**），被 `bench.py`
+与 `sweep.py` 复用——1% low = 最慢 1% 帧的平均帧时的倒数，回答"最卡的那 4 帧有多卡"，
+比均值更能暴露分配/同步尖峰。
 
 ## 各工具的判读要点与已知偏差
 
@@ -32,6 +35,9 @@
   全量重绘**（真实 GUI 用 `FuncAnimation(blit=True)`，便宜得多）。
 - 绝对值跨时段/跨机器**不可比**（笔记本热漂移可达 ±30%）。只用于同会话趋势；
   要证明"变快了多少"用 `ab_iter.py`。
+- 帧率指标（游戏口径）：`frame_rates.compute` = 只看 update，`frame_rates.per_frame` =
+  update + 全量 draw；各含 `avg_fps`、`p50/p95/p99/max` 帧时与 `one_percent_low` /
+  `point_one_percent_low`。**1% low 与平均帧率差距大 = 有偶发长帧**，差距小 = 帧时稳定。
 
 ### `ab_iter.py`（A/B 对照）
 
@@ -58,6 +64,8 @@
   并行读 `nvidia-smi` 采样 util/功耗/显存。
 - 输出的是**吞吐**（帧/秒 与加速比），不是单世界延迟；K=1 基线也会随机器状态漂移，
   报告里要写"同会话内相对比 + 绝对帧率"。
+- 每个子进程同时返回 `frame_rates`（含 1% low）；父进程汇总里 `one_percent_low_fps_median`
+  是各 job 的中位——它比吞吐更敏感于多进程争抢造成的卡顿。
 
 ### `ensemble.py`（观测层）
 

@@ -9,8 +9,11 @@
 - draw 是每帧 canvas.draw() 全量重绘；Agg 后端的 canvas.blit() 是空实现，所以这里没有逐 artist blit，
   比真实 GUI 的 FuncAnimation(blit=True) 路径贵得多。
 绝对值跨时段/跨机器不可比（热漂移可达 ±30%），只适合同机器同会话 A/B；结论看 per_frame_ms 的相对变化。
+帧率分布：除均值外还输出游戏评测口径的 **1% low / 0.1% low**（最慢 1%/0.1% 帧的平均帧时取倒数），
+比均值更能暴露尖峰；`frame_rates.compute` 只看 update，`frame_rates.per_frame` 含全量 canvas.draw()。
 JSON 字段：update/draw_blit={n,mean_ms,median_ms,min_ms,max_ms,total_s}；first_update_ms 含懒初始化，
-warm_update_ms 是第二次 update(0)；per_frame_ms=update.mean+draw.mean（--no-draw 时只有 update）。
+warm_update_ms 是第二次 update(0)；per_frame_ms=update.mean+draw.mean（--no-draw 时只有 update）；
+frame_rates={compute,per_frame}，各含 n/avg_fps/p50_ms/p95_ms/p99_ms/max_ms/one_percent_low/point_one_percent_low。
 """
 
 from __future__ import annotations
@@ -28,6 +31,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MODULE = ROOT / "simple_disease_simulation.py"
+TOOLS = Path(__file__).resolve().parent
+if str(TOOLS) not in sys.path:  # 直接 `python tools/bench.py` 时 sys.path[0] 已是 tools；从别处 import 时兜底
+    sys.path.insert(0, str(TOOLS))
+
+from _stats import frame_rate_stats  # noqa: E402  (tools/_stats.py：1% low / 0.1% low)
 
 
 def patch_matplotlib() -> None:
@@ -138,23 +146,29 @@ def bench(module, frames: int, measure_draw: bool, label: str) -> dict:
 
     update_samples: list[float] = []
     draw_samples: list[float] = []
+    frame_samples: list[float] = []  # update+draw 的完整帧时（ms），用于游戏式 1% low 指标
     wall0 = time.perf_counter()  # wall 只覆盖主循环，不含加载/首帧/热帧
     for frame in range(1, frames):
         t0 = time.perf_counter()
         module.update(frame)
         if cuda:
             torch.cuda.synchronize()  # 内核异步执行，sync 后才算本帧真实耗时
-        update_samples.append(time.perf_counter() - t0)
+        update_ms = (time.perf_counter() - t0) * 1000.0
+        update_samples.append(update_ms / 1000.0)
         if measure_draw:
             t0 = time.perf_counter()
             canvas.draw()  # 全量重绘（口径见模块 docstring，比 GUI blit 路径贵）
             if artists:
                 canvas.blit(artists)  # Agg 下是空实现；保留调用以贴合 GUI 的调用结构
-            draw_samples.append(time.perf_counter() - t0)
+            draw_ms = (time.perf_counter() - t0) * 1000.0
+            draw_samples.append(draw_ms / 1000.0)
+            frame_samples.append(update_ms + draw_ms)
     wall = time.perf_counter() - wall0
 
     update_s = summarize(update_samples)
     draw_s = summarize(draw_samples)
+    compute_rates = frame_rate_stats([v * 1000.0 for v in update_samples])
+    frame_rates = frame_rate_stats(frame_samples)
     per_frame = update_s["mean_ms"] if update_s else 0.0
     if measure_draw and draw_s:
         per_frame += draw_s["mean_ms"]
@@ -167,6 +181,10 @@ def bench(module, frames: int, measure_draw: bool, label: str) -> dict:
         "warm_update_ms": round(warm_update * 1000, 3),
         "update": update_s,
         "draw_blit": draw_s,
+        "frame_rates": {
+            "compute": compute_rates,          # 只看模型步进：与 --no-draw 同口径
+            "per_frame": frame_rates or None,  # 含全量 canvas.draw() 的完整帧
+        },
         "per_frame_ms": round(per_frame, 3),
         "wall_s": round(wall, 3),
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -189,13 +207,17 @@ def compare_rows(paths: list[str]) -> None:
     header = f"{'run':<12}{'profile':<12}{'N':>8}{'frames':>7}"
     for key in keys:
         header += f"{key + '.mean_ms':>18}"
-    header += f"{'per_frame_ms':>15}{'cuda_peak_mb':>14}{'wall_s':>9}"
+    header += f"{'per_frame_ms':>15}{'1%low_fps':>11}{'frame 1%low':>13}{'cuda_peak_mb':>14}{'wall_s':>9}"
     print(header)
     for run in runs:
         row = f"{str(run.get('label'))[:11]:<12}{str(run.get('profile'))[:11]:<12}{run.get('population', 0):>8}{run.get('frames', 0):>7}"
         for key in keys:
             row += f"{run.get(key, {}).get('mean_ms', 0.0):>18.3f}"
+        rates = run.get("frame_rates") or {}
+        compute_low = (rates.get("compute") or {}).get("one_percent_low") or {}
+        frame_low = (rates.get("per_frame") or {}).get("one_percent_low") or {}
         row += f"{run.get('per_frame_ms', 0.0):>15.3f}"
+        row += f"{str(compute_low.get('fps', '-')):>11}{str(frame_low.get('fps', '-')):>13}"
         row += f"{str(run.get('cuda_peak_mb')):>14}{run.get('wall_s', 0.0):>9.2f}"
         print(row)
 
@@ -260,10 +282,16 @@ def main(argv: list[str] | None = None) -> int:
     except Exception:  # pragma: no cover
         pass
 
+    compute_low = (result["frame_rates"].get("compute") or {}).get("one_percent_low") or {}
+    frame_low = (result["frame_rates"].get("per_frame") or {}).get("one_percent_low") or {}
+    compute_avg = (result["frame_rates"].get("compute") or {}).get("avg_fps")
     print(
         f"update mean={result['update']['mean_ms']}ms median={result['update']['median_ms']}ms "
         f"| draw+blit mean={result['draw_blit'].get('mean_ms')}ms | per_frame={result['per_frame_ms']}ms "
-        f"| CUDA peak={result.get('cuda_peak_mb')}MB | wall={result['wall_s']}s",
+        f"| 平均 {compute_avg} fps | 1% low {compute_low.get('fps')} fps "
+        f"(最慢 {compute_low.get('window_frames')} 帧均值 {compute_low.get('mean_ms')}ms)"
+        + (f" | 含绘制 1% low {frame_low.get('fps')} fps" if frame_low else "")
+        + f" | CUDA peak={result.get('cuda_peak_mb')}MB | wall={result['wall_s']}s",
         flush=True,
     )
     if args.json:
