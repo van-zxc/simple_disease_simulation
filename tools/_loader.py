@@ -1,7 +1,8 @@
-"""分析工具共用的加载器：Agg 打桩 + 按环境变量加载入口脚本。
+"""分析工具共用的加载器：无头打桩 + 按环境变量加载入口脚本。
 
-研究脚本（bench/diag/ensemble/ab_iter/sweep…）需要在不弹窗的情况下驱动模拟。
-入口在 import 期就会建 fig / FuncAnimation，所以必须先打桩再加载。
+研究脚本（bench/diag/ensemble/ab_iter/sweep…）需要在不启仪表盘的情况下驱动模拟。
+入口在 import 期只做 ``build_simulation()``（不启动服务），所以这里只需设好
+``DISEASE_VIEW=headless`` 让 ``cli`` 走无 UI 路径；不再需要打桩 matplotlib。
 
 用法：
     import _loader
@@ -21,28 +22,20 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def patch_matplotlib() -> None:
-    """禁止 import 期创建真实动画或阻塞在 plt.show（Agg + 动画打桩）。"""
-    import matplotlib
+def patch_headless() -> None:
+    """无头模式：让入口的 ``cli.main`` 走"不启仪表盘、跑完即退"的分支。
 
-    matplotlib.use("Agg")
-    import matplotlib.animation as mpl_animation
-    import matplotlib.pyplot as plt
+    在 import 前设置环境变量（入口加载期不启动服务，这里主要是给可能调用 cli.main 的脚本兜底）。
+    """
+    os.environ["DISEASE_VIEW"] = "headless"
 
-    class _DummyFuncAnimation:
-        def __init__(self, *args, **kwargs):
-            self.args = args
-            self.kwargs = kwargs
 
-        def save(self, *args, **kwargs):
-            return None
-
-    mpl_animation.FuncAnimation = _DummyFuncAnimation  # type: ignore[assignment]
-    plt.show = lambda *a, **k: None  # type: ignore[assignment]
+# 兼容旧名字：以前这个函数用来给 matplotlib 打桩，界面换成本地 Web 后只剩无头开关。
+patch_matplotlib = patch_headless
 
 
 def load_module(path: Path, env: dict[str, str], verbose: bool = False):
-    """注入环境变量 → 打桩 → exec_module，返回 (module, 加载秒数, stdout)。
+    """注入环境变量 → 无头打桩 → exec_module，返回 (module, 加载秒数, stdout)。
 
     ``path`` 必须以 .py 结尾（``spec_from_file_location`` 对 .bak 返回 None）。
     同一进程不要先后加载两个入口（第二个会命中 sys.modules 里的包），
@@ -51,7 +44,7 @@ def load_module(path: Path, env: dict[str, str], verbose: bool = False):
     for key, value in env.items():
         os.environ[key] = value
 
-    patch_matplotlib()
+    patch_headless()
 
     spec = importlib.util.spec_from_file_location("sim_runtime", str(path))
     if spec is None or spec.loader is None:

@@ -1,18 +1,19 @@
 #!/usr/bin/env python
-"""性能基准：同一会话内测 update / draw 的单帧成本，输出可 diff 的 JSON（只作 A/B 对比，不作绝对门禁）。
+"""性能基准：同一会话内测 update / pack 的单帧成本，输出可 diff 的 JSON（只作 A/B 对比，不作绝对门禁）。
 
 输入：仓库根 simple_disease_simulation.py（--module 可换；--profile/--population/--seed 走环境变量）。
 输出：控制台一行汇总；--json 落盘；--compare 并排比较多份 JSON，并算首份 vs 末份的百分比变化。
 
 口径（与其它工具不同，别混用）：
-- update 计时含 torch.cuda.synchronize()（CUDA 下单帧真实耗时），不含绘制。
-- draw 是每帧 canvas.draw() 全量重绘；Agg 后端的 canvas.blit() 是空实现，所以这里没有逐 artist blit，
-  比真实 GUI 的 FuncAnimation(blit=True) 路径贵得多。
+- update 计时含 torch.cuda.synchronize()（CUDA 下单帧真实耗时），不含视图负载。
+- pack 是 `render.pack_frame()`：统计 dict → JSON 字节 + 抽样点云 → 二进制块（纯 CPU 序列化，不含网络/浏览器）。
+  它是"视图成本"的服务端部分；旧的 draw+blit 口径（Agg canvas.draw）已随 matplotlib 移除。
 绝对值跨时段/跨机器不可比（热漂移可达 ±30%），只适合同机器同会话 A/B；结论看 per_frame_ms 的相对变化。
 帧率分布：除均值外还输出游戏评测口径的 **1% low / 0.1% low**（最慢 1%/0.1% 帧的平均帧时取倒数），
-比均值更能暴露尖峰；`frame_rates.compute` 只看 update，`frame_rates.per_frame` 含全量 canvas.draw()。
-JSON 字段：update/draw_blit={n,mean_ms,median_ms,min_ms,max_ms,total_s}；first_update_ms 含懒初始化，
-warm_update_ms 是第二次 update(0)；per_frame_ms=update.mean+draw.mean（--no-draw 时只有 update）；
+比均值更能暴露尖峰；`frame_rates.compute` 只看 update，`frame_rates.per_frame` 含 pack。
+JSON 字段：update/pack={n,mean_ms,median_ms,min_ms,max_ms,total_s}；pack_bytes={header,points}（均值字节数）；
+first_update_ms 含懒初始化，warm_update_ms 是第二次 update(0)；
+per_frame_ms=update.mean+pack.mean（--no-pack 时只有 update）；
 frame_rates={compute,per_frame}，各含 n/avg_fps/p50_ms/p95_ms/p99_ms/max_ms/one_percent_low/point_one_percent_low。
 """
 
@@ -38,38 +39,24 @@ if str(TOOLS) not in sys.path:  # 直接 `python tools/bench.py` 时 sys.path[0]
 from _stats import frame_rate_stats  # noqa: E402  (tools/_stats.py：1% low / 0.1% low)
 
 
-def patch_matplotlib() -> None:
-    """打桩 matplotlib：必须先于入口模块 import 执行，否则入口在 import 期创建动画/调 show() 会卡死或弹窗。
+def patch_headless() -> None:
+    """切无界面模式：必须先于入口模块 import 执行。
 
-    只做三件事：切 Agg、把 FuncAnimation 换成只存构造参数的假类、把 plt.show 置空。
+    入口的 ``cli.main()`` 只在 ``__main__`` 分支里跑，import 期不启动服务；这里额外设
+    ``DISEASE_VIEW=headless``，让工具侧任何误调 ``cli.main`` 的路径也不会去等浏览器连接。
     """
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.animation as mpl_animation
-    import matplotlib.pyplot as plt
-
-    class _DummyFuncAnimation:  # pragma: no cover - 仅打桩
-        def __init__(self, *args, **kwargs):
-            self.args = args
-            self.kwargs = kwargs
-
-        def save(self, *args, **kwargs):
-            return None
-
-    mpl_animation.FuncAnimation = _DummyFuncAnimation  # type: ignore[assignment]
-    plt.show = lambda *a, **k: None  # type: ignore[assignment]
+    os.environ.setdefault("DISEASE_VIEW", "headless")
 
 
 def load_module(path: Path, env: dict[str, str]):
-    """设好环境变量→打桩→用 spec_from_file_location 加载入口，返回 (module, 加载秒数, import 期 stdout)。
+    """设好环境变量→切无界面→用 spec_from_file_location 加载入口，返回 (module, 加载秒数, import 期 stdout)。
 
     env 必须在 import 前写入：入口按 DISEASE_PROFILE/DISEASE_POPULATION/DISEASE_SEED 决定规模与档案。
     加载期临时关字节码写入，避免仓库里出现 __pycache__；stdout 被吞掉，尾部留给 JSON 诊断。
     """
     for key, value in env.items():
         os.environ[key] = value
-    patch_matplotlib()
+    patch_headless()
 
     spec = importlib.util.spec_from_file_location("sim_bench", str(path))
     if spec is None or spec.loader is None:
@@ -117,16 +104,19 @@ def summarize(samples: list[float]) -> dict:
     }
 
 
-def bench(module, frames: int, measure_draw: bool, label: str) -> dict:
+def bench(module, frames: int, measure_pack: bool, label: str) -> dict:
     """跑计时循环，返回一次基准的完整 JSON 结构。
 
     frames 是总 update 次数：先两次 update(0)（首帧含懒初始化、热帧代表稳定态），主循环从 1 跑到
-    frames-1，与分析工具的帧序一致。update 每帧后 synchronize（CUDA）；measure_draw 时再全量
-    canvas.draw()（Agg 下 blit 为空实现）。返回值字段见模块 docstring。
+    frames-1，与分析工具的帧序一致。update 每帧后 synchronize（CUDA）；measure_pack 时再调
+    ``render.pack_frame``（统计 JSON + 点云二进制）。返回值字段见模块 docstring。
     """
+    import importlib
+
     import torch
 
-    canvas = module.fig.canvas
+    render_mod = importlib.import_module("disease_sim.render")
+    sim = module._SIM
     cuda = torch.cuda.is_available()
     if cuda:
         torch.cuda.synchronize()
@@ -134,19 +124,21 @@ def bench(module, frames: int, measure_draw: bool, label: str) -> dict:
 
     # 两次 update(0)：第一次含懒初始化/缓存构建，第二次代表稳定态；差值说明首次更新开销。
     t0 = time.perf_counter()
-    artists = module.update(0)
+    module.update(0)
     if cuda:
         torch.cuda.synchronize()  # 与主循环同口径：sync 后计时才包含 GPU 工作
     first_update = time.perf_counter() - t0
     t0 = time.perf_counter()
-    artists = module.update(0)
+    module.update(0)
     if cuda:
         torch.cuda.synchronize()
     warm_update = time.perf_counter() - t0
 
     update_samples: list[float] = []
-    draw_samples: list[float] = []
-    frame_samples: list[float] = []  # update+draw 的完整帧时（ms），用于游戏式 1% low 指标
+    pack_samples: list[float] = []
+    frame_samples: list[float] = []  # update+pack 的完整帧时（ms），用于游戏式 1% low 指标
+    header_bytes = 0
+    points_bytes = 0
     wall0 = time.perf_counter()  # wall 只覆盖主循环，不含加载/首帧/热帧
     for frame in range(1, frames):
         t0 = time.perf_counter()
@@ -155,23 +147,24 @@ def bench(module, frames: int, measure_draw: bool, label: str) -> dict:
             torch.cuda.synchronize()  # 内核异步执行，sync 后才算本帧真实耗时
         update_ms = (time.perf_counter() - t0) * 1000.0
         update_samples.append(update_ms / 1000.0)
-        if measure_draw:
+        if measure_pack:
             t0 = time.perf_counter()
-            canvas.draw()  # 全量重绘（口径见模块 docstring，比 GUI blit 路径贵）
-            if artists:
-                canvas.blit(artists)  # Agg 下是空实现；保留调用以贴合 GUI 的调用结构
-            draw_ms = (time.perf_counter() - t0) * 1000.0
-            draw_samples.append(draw_ms / 1000.0)
-            frame_samples.append(update_ms + draw_ms)
+            header, points = render_mod.pack_frame(sim, frame)
+            pack_ms = (time.perf_counter() - t0) * 1000.0
+            pack_samples.append(pack_ms / 1000.0)
+            header_bytes += len(header)
+            points_bytes += len(points)
+            frame_samples.append(update_ms + pack_ms)
     wall = time.perf_counter() - wall0
 
+    n_pack = max(1, len(pack_samples))
     update_s = summarize(update_samples)
-    draw_s = summarize(draw_samples)
+    pack_s = summarize(pack_samples)
     compute_rates = frame_rate_stats([v * 1000.0 for v in update_samples])
     frame_rates = frame_rate_stats(frame_samples)
     per_frame = update_s["mean_ms"] if update_s else 0.0
-    if measure_draw and draw_s:
-        per_frame += draw_s["mean_ms"]
+    if measure_pack and pack_s:
+        per_frame += pack_s["mean_ms"]
     result = {
         "label": label,
         "profile": getattr(module, "ACTIVE_PROFILE_NAME", None),
@@ -180,10 +173,14 @@ def bench(module, frames: int, measure_draw: bool, label: str) -> dict:
         "first_update_ms": round(first_update * 1000, 3),
         "warm_update_ms": round(warm_update * 1000, 3),
         "update": update_s,
-        "draw_blit": draw_s,
+        "pack": pack_s,
+        "pack_bytes": {
+            "header": round(header_bytes / n_pack, 1) if measure_pack else 0.0,
+            "points": round(points_bytes / n_pack, 1) if measure_pack else 0.0,
+        },
         "frame_rates": {
-            "compute": compute_rates,          # 只看模型步进：与 --no-draw 同口径
-            "per_frame": frame_rates or None,  # 含全量 canvas.draw() 的完整帧
+            "compute": compute_rates,          # 只看模型步进：与 --no-pack 同口径
+            "per_frame": frame_rates or None,  # 含 pack 的完整帧
         },
         "per_frame_ms": round(per_frame, 3),
         "wall_s": round(wall, 3),
@@ -203,7 +200,7 @@ def compare_rows(paths: list[str]) -> None:
             return
         runs.append(json.loads(path.read_text(encoding="utf-8")))
 
-    keys = ["update", "draw_blit"]
+    keys = ["update", "pack"]
     header = f"{'run':<12}{'profile':<12}{'N':>8}{'frames':>7}"
     for key in keys:
         header += f"{key + '.mean_ms':>18}"
@@ -239,7 +236,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--frames", type=int, default=400)
     parser.add_argument("--label", default=None)
-    parser.add_argument("--no-draw", action="store_true", help="只测 update，不重绘 canvas")
+    parser.add_argument("--no-pack", "--no-draw", dest="no_pack", action="store_true",
+                        help="只测 update，不打包视图负载（--no-draw 为旧名，保留兼容）")
     parser.add_argument("--json", default=None, help="结果写入 JSON")
     parser.add_argument("--compare", nargs="+", default=None, help="对比多个 JSON 结果")
     return parser.parse_args(argv)
@@ -257,7 +255,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"入口文件不存在：{module_path}", file=sys.stderr)
         return 2
 
-    env: dict[str, str] = {"MPLBACKEND": "Agg"}
+    env: dict[str, str] = {"DISEASE_VIEW": "headless"}
     if args.profile:
         env["DISEASE_PROFILE"] = args.profile
     if args.population:
@@ -273,7 +271,7 @@ def main(argv: list[str] | None = None) -> int:
         flush=True,
     )
     label = args.label or f"{(args.profile or 'default')}_{module.CONFIG.get('N_AGENTS')}_{args.frames}"
-    result = bench(module, args.frames, not args.no_draw, label)
+    result = bench(module, args.frames, not args.no_pack, label)
     result["load_s"] = round(load_s, 3)
     result["import_stdout_tail"] = import_stdout[-1000:]
     result["python"] = sys.version.split()[0]
@@ -287,10 +285,12 @@ def main(argv: list[str] | None = None) -> int:
     compute_avg = (result["frame_rates"].get("compute") or {}).get("avg_fps")
     print(
         f"update mean={result['update']['mean_ms']}ms median={result['update']['median_ms']}ms "
-        f"| draw+blit mean={result['draw_blit'].get('mean_ms')}ms | per_frame={result['per_frame_ms']}ms "
+        f"| pack mean={result['pack'].get('mean_ms')}ms "
+        f"({result['pack_bytes']['header'] / 1024:.1f}KB 头 + {result['pack_bytes']['points'] / 1024:.1f}KB 点) "
+        f"| per_frame={result['per_frame_ms']}ms "
         f"| 平均 {compute_avg} fps | 1% low {compute_low.get('fps')} fps "
         f"(最慢 {compute_low.get('window_frames')} 帧均值 {compute_low.get('mean_ms')}ms)"
-        + (f" | 含绘制 1% low {frame_low.get('fps')} fps" if frame_low else "")
+        + (f" | 含 pack 1% low {frame_low.get('fps')} fps" if frame_low else "")
         + f" | CUDA peak={result.get('cuda_peak_mb')}MB | wall={result['wall_s']}s",
         flush=True,
     )

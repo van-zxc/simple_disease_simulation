@@ -1,136 +1,207 @@
-"""Matplotlib 图形/坐标轴搭建与封控按钮（纯表现层，不参与模型语义）。
+"""视图层：把每帧的仿真状态打包成浏览器可直接绘制的负载（不依赖任何绘图库）。
 
-负责：3×3 网格布局（主图 + 3 个曲线子图）、15 个动态 artist、静态场所散点、封控按钮。
-不负责：每帧的 artist 数据更新（在 simulation F 段）、模型状态与统计口径。
+分工（模块边界）：
+- ``build_render(sim)``：装配期一次性初始化（抽样索引、场所静态层、历史容器、封控开关）；
+- ``meta(sim)``：连接建立时发送一次静态描述（人口/世界/帧数/床位/颜色/场所层清单）；
+- ``venue_blob(sim)``：场所层二进制点集（Float32 x,y,size + Uint8 layer），只发一次；
+- ``pack_frame(sim, frame)``：一帧的动态负载（JSON 头 + 点云二进制）。
 
-调用方契约：FuncAnimation 按固定顺序取这 15 个 artist（2 + 8 + 5，顺序见
-simulation 的返回值），并要求每个都有 .axes；静态场所散点不在其中，不能挪进返回值。
+调用方契约（``server.py``）：每帧先发 JSON（含 ``t`` 与 ``n``），紧跟点云二进制；
+两段用帧号配对。``sim.last_stats`` 由 ``simulation.update`` 的 F 段写入，本模块只做序列化。
+
+为什么是"打包"而不是"渲染"：曲线自动缩放、指标排版、字体渲染全部交给浏览器（Canvas 2D），
+服务端每帧只做「统计 dict → JSON」+「抽样点 → 连续内存块」两次拷贝，没有图元/坐标轴概念。
 """
+
+from __future__ import annotations
+
+import json
+import threading
 
 import numpy as np
 import torch
-import matplotlib.pyplot as plt
-from matplotlib.colors import to_rgba
-from matplotlib.widgets import Button
 
+from . import config
+from . import profiles as disease_profiles
 from .config import CONFIG, device
-
 
 # 状态 → 颜色：下标即 status 码 0..7（顺序必须与 state 里的状态定义一致）
 COLOR_MAP = ["#B0B0B0", '#00BFFF', '#FFD700', '#FF4500', '#000000', '#32CD32',
              '#FF8C00', '#8A2BE2']
-# 预转 RGBA 的 (8,4) 数组：每帧整块喂给 mpl，省掉 Python 侧逐点颜色转换
-COLOR_LUT = np.array([to_rgba(c) for c in COLOR_MAP])
+# 与 COLOR_MAP 同序的英文全称：服务端只给标签，中文注释在前端 i18n 表里
+STATUS_LABELS = ["Healthy", "Immune", "Incubating", "Symptomatic", "Dead", "Recovered",
+                 "Asymptomatic", "Hospitalized"]
+
+# 场所静态层：(层名, sim 上的坐标属性, 占用人数属性, 展示标签, 颜色, 形状名)
+# 形状名由前端映射到 Canvas 绘制路径（square/triangle/circle/cross）。
+VENUE_STYLES = [
+    ("workplace", "work_venue_np", "work", "Workplace 工作场所", '#4C72B0', "square"),
+    ("school", "school_venue_np", "school", "School 学校", '#8172B2', "triangle"),
+    ("shop", "shop_venue_np", "shop", "Shop 商店", '#DD8452', "circle"),
+    ("park", "park_venue_np", "park", "Park 公园", '#55A868', "cross"),
+]
+# 点大小基准：10k 基准下每个工作场所的平均在岗人数（与旧 s=64 的基准一致）
+VENUE_REFERENCE_OCCUPANCY = 208.0
+# 前端把 size_norm = sqrt(occ/208) 映射成屏幕像素直径时的钳位（像素）
+VENUE_SIZE_MIN_PX = 1.6
+VENUE_SIZE_MAX_PX = 26.0
+
+
+class ViewState:
+    """跨线程的"最新一帧"槽位：仿真线程写、HTTP/WS 线程读。
+
+    ``latest`` 只保留最新一帧（旧帧被覆盖），所以慢客户端不会积压内存，最坏情况是掉帧。
+    ``started`` 供仿真线程等待第一个浏览器连接（``--no-wait`` 时预先置位）。
+    """
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.done = False
+        self._lock = threading.Lock()
+        self._latest: tuple[int, bytes, bytes] | None = None
+        self._sent = -1
+
+    def publish(self, frame: int, header: bytes, points: bytes) -> None:
+        with self._lock:
+            self._latest = (int(frame), header, points)
+
+    def take_new(self) -> tuple[int, bytes, bytes] | None:
+        """取出比上次取出的更新的一帧；没有新帧返回 None（同一帧不会重复发送）。"""
+        with self._lock:
+            if self._latest is None or self._latest[0] <= self._sent:
+                return None
+            self._sent = self._latest[0]
+            return self._latest
+
+    @property
+    def frame(self) -> int:
+        """最新已发布的帧号（从未发布返回 -1）。"""
+        with self._lock:
+            return -1 if self._latest is None else self._latest[0]
+
+
+def _make_toggle(sim):
+    """封控开关：浏览器点按钮 → POST /api/toggle → 这里翻转并返回新状态。
+
+    参数 event 可选（保留旧 mpl 回调签名，headless/工具可直接 ``sim.toggle()``）。
+    """
+
+    def toggle(event=None) -> bool:
+        sim.lockdown_active = not bool(getattr(sim, "lockdown_active", False))
+        return sim.lockdown_active
+
+    return toggle
 
 
 def build_render(sim) -> None:
-    """搭建图形、坐标轴、artist 与封控按钮；只在装配阶段调用一次。
-
-    调用方契约：返回给 FuncAnimation 的 artist 顺序为 [scat, title_obj] + lines_pop(8)
-    + [line_beta, line_mu, line_immunity, line_gen, line_reinf]（共 15 个，按数量校验的调用方
-    校验数量与 .axes）；这里增删 artist 必须同步改 simulation 的返回列表。
-    """
-    sim.fig = plt.figure(figsize=(18, 10))
-
-    # 主图：世界坐标 1:1（aspect equal），场所与散点都按世界单位绘制
-    sim.ax_main = plt.subplot2grid((3, 3), (0, 0), rowspan=3, colspan=2)
-    sim.ax_main.set_xlim(0, sim.W)
-    sim.ax_main.set_ylim(0, sim.H)
-    sim.ax_main.set_aspect('equal')
-    sim.ax_main.set_title('Virus Evolution CA with Immunity System', fontsize=14, fontweight='bold')
-
-    # 场所标记：静态 artist，只绘制一次（不参与 blit 重绘，也不在 update 返回值里）
-    # marker 用形状区分四类场所；点的大小按"该场馆的占用人数"缩放（人能装多少，点就多大），
-    # 这样 1M 人口下不会出现 2000 个同样大小的实心方块糊成一片，工作/学校之间的规模差异
-    # 也肉眼可见。基准 208 人（10k 基准下每个工作场所的平均在岗人数）对应 s=64。
-    _venue_occ = getattr(sim, "venue_occupancy", {})
-    sim._venue_styles = [
-        ("Workplace", '#4C72B0', 's', sim.work_venue_np, _venue_occ.get("work")),
-        ("School", '#8172B2', '^', sim.school_venue_np, _venue_occ.get("school")),
-        ("Shop", '#DD8452', 'o', sim.shop_venue_np, _venue_occ.get("shop")),
-        ("Park", '#55A868', 'P', sim.park_venue_np, _venue_occ.get("park")),
-    ]
-    for _vlabel, _vcolor, _vmarker, _varr, _vpops in sim._venue_styles:
-        if _vpops is None:
-            _vsizes = 64.0
-        else:
-            _vsizes = np.clip(64.0 * np.sqrt(np.maximum(np.asarray(_vpops, dtype=float), 1.0) / 208.0),
-                              6.0, 300.0)
-        sim.ax_main.scatter(_varr[:, 0], _varr[:, 1], s=_vsizes, marker=_vmarker, c=_vcolor,
-                        alpha=0.6, edgecolors='white', linewidths=0.5,
-                        zorder=0.4, label=_vlabel)
-    sim.ax_main.legend(loc='lower left', fontsize=7, framealpha=0.45)
-
-    # 小方点：Agg 绘制每个 marker 的顶点数约为圆形的 1/6，10k 点交互绘制明显更快
-    # （s=2 时肉眼几乎无差别；15 artist / 4 axes 的可视化 contract 不变）
-    sim.scat = sim.ax_main.scatter([], [], s=2, marker='s', edgecolors='none', alpha=0.8)
-    # 大人口下只绘制随机抽样点（完整状态仍全部参与模拟）；固定抽样保证画面结构稳定
+    """装配期初始化视图状态（取代旧的 matplotlib 图形搭建）。"""
     sim._RENDER_MAX = int(CONFIG["RENDER_MAX_POINTS"])
     if sim._RENDER_MAX and sim.N > sim._RENDER_MAX:
+        # 大人口下只传固定抽样点（完整状态仍全部参与模拟）；固定抽样保证画面结构稳定
         sim.render_idx = torch.randperm(sim.N, device=device)[:sim._RENDER_MAX]
     else:
-        # None = 不抽样：F 段走"全量 set_offsets + 整块 facecolor"路径
         sim.render_idx = None
-    # 三行标题（overlay）：F 段每帧重写文本，三行分别是人口/传播/代数指标
-    sim.title_obj = sim.ax_main.text(0.5, 0.99, "", transform=sim.ax_main.transAxes,
-                             ha="center", va="top", fontsize=9.5, fontweight='bold',
-                             clip_on=True,
-                             bbox=dict(facecolor='white', alpha=0.55, edgecolor='none'))
-
-    # 三个曲线子图共用 0..500 的 x 窗口（= 500 帧），超出后 F 段滚动历史
-    sim.ax_pop = plt.subplot2grid((3, 3), (0, 2))
-    sim.ax_pop.set_title('Population Status')
-    sim.ax_pop.set_xlim(0, 500)
-    sim.ax_pop.set_ylim(0, sim.N)
-
-    # 8 条人口曲线：下标/颜色/标签顺序 = status 码 0..7
+    # 历史曲线（数据侧保留全历史；浏览器自己裁剪到 500 点窗口）
     sim.history = {s: [] for s in range(8)}
-    sim.lines_pop = [sim.ax_pop.plot([], [], color=COLOR_MAP[i],
-                 label=['Healthy', 'Immune', 'Incubating', 'Symptomatic', 'Dead', 'Recovered',
-                        'Asymptomatic', 'Hospitalized'][i])[0]
-                 for i in range(8)]
-    sim.ax_pop.legend(loc='upper right', fontsize=7)
-
-    sim.ax_virus = plt.subplot2grid((3, 3), (1, 2))
-    sim.ax_virus.set_title('Virus Evolution')
-    sim.ax_virus.set_xlim(0, 500)
-    # y 上限 1.6：beta/immunity ∈ [0,1]，mu 按图例标注 ×10 后仍不超过 1.6
-    sim.ax_virus.set_ylim(0, 1.6)
-
-    sim.line_beta = sim.ax_virus.plot([], [], 'r-', label='Beta (transmit)', linewidth=2)[0]
-    sim.line_mu = sim.ax_virus.plot([], [], 'orange', label='Mu (death x10)', linewidth=2)[0]
-    sim.line_immunity = sim.ax_virus.plot([], [], 'cyan', label='Avg Immunity', linewidth=2)[0]
-    sim.ax_virus.legend(loc='upper right', fontsize=8)
-
     sim.virus_history = {'beta': [], 'mu': [], 'gen': [], 'immunity': []}
+    sim.last_stats = None
+    if not hasattr(sim, "lockdown_active"):
+        sim.lockdown_active = False
+    sim.toggle = _make_toggle(sim)
+    sim.view = ViewState()
+    # 场所层二进制（静态，连接时只发一次）
+    sim._venue_blob = _build_venue_blob(sim)
 
-    sim.ax_gen = plt.subplot2grid((3, 3), (2, 2))
-    sim.ax_gen.set_title('Generation & Reinfections')
-    sim.ax_gen.set_xlim(0, 500)
-    # y 上限 105：同时容纳平均代数（<100）与再感染百分比（0..100）
-    sim.ax_gen.set_ylim(0, 105)
-    sim.line_gen = sim.ax_gen.plot([], [], 'cyan', linewidth=2, label='Avg Gen')[0]
-    sim.line_reinf = sim.ax_gen.plot([], [], 'magenta', linewidth=2, label='Reinfection %')[0]
-    sim.ax_gen.legend(loc='upper right', fontsize=8)
 
-    # 按钮用 figure 绝对坐标放在主图下方（x=0.45, y=0.02，宽 0.1 高 0.04）
-    sim.ax_btn = plt.axes([0.45, 0.02, 0.1, 0.04])
-    sim.btn = Button(sim.ax_btn, 'LOCKDOWN', color='#FF4500')
+def _venue_size_norm(occupancy) -> np.ndarray:
+    """占用人数 → 归一化尺寸因子（sqrt 缩放：面积 ∝ 人数，人越多占屏幕越大）。"""
+    occ = np.maximum(np.asarray(occupancy, dtype=np.float32), 1.0)
+    return np.sqrt(occ / VENUE_REFERENCE_OCCUPANCY)
 
-    def toggle(event):
-        # 位置参数 event 匹配 mpl 的回调签名（Button 以 event 调用，参数名无所谓但必须收）
-        sim.lockdown_active = not sim.lockdown_active
-        sim.btn.label.set_text('RESUME' if sim.lockdown_active else 'LOCKDOWN')
-        # 同时更新 Button.color：mpl 的 _motion 在鼠标移出时用它恢复颜色，
-        # 只改 ax.facecolor 会被 hover 事件覆盖（3.9.x 行为）
-        sim.btn.color = '#32CD32' if sim.lockdown_active else '#FF4500'
-        sim.btn.ax.set_facecolor(sim.btn.color)
-        sim.btn.ax.figure.canvas.draw_idle()
 
-    sim.btn.on_clicked(toggle)
+def _build_venue_blob(sim) -> tuple[list[dict], bytes]:
+    """构造场所层：返回 (层清单, 二进制) ；二进制 = 每层连续 Float32 (x, y, size_norm)。"""
+    occ_map = getattr(sim, "venue_occupancy", {}) or {}
+    layers: list[dict] = []
+    chunks: list[np.ndarray] = []
+    cursor = 0
+    for kind, attr, occ_key, label, color, shape in VENUE_STYLES:
+        arr = getattr(sim, attr, None)
+        if arr is None:
+            continue
+        coords = np.asarray(arr, dtype=np.float32)
+        if coords.size == 0:
+            continue
+        count = int(coords.shape[0])
+        occ = occ_map.get(occ_key)
+        if occ is None:
+            sizes = np.ones(count, dtype=np.float32)
+        else:
+            sizes = _venue_size_norm(occ).astype(np.float32)
+            if sizes.shape[0] != count:  # 防御：占用数组与坐标长度不一致时退化为统一点
+                sizes = np.ones(count, dtype=np.float32)
+        block = np.empty((count, 3), dtype=np.float32)
+        block[:, :2] = coords[:, :2]
+        block[:, 2] = sizes
+        chunks.append(block)
+        layers.append({
+            "kind": kind, "label": label, "color": color, "shape": shape,
+            "count": count, "start": cursor,
+        })
+        cursor += count
+    if chunks:
+        blob = np.concatenate(chunks, axis=0).tobytes()
+    else:
+        blob = b""
+    return layers, blob
 
-    # 布局留白：给主图标题、底部按钮与右侧图例留空间
-    sim.fig.subplots_adjust(left=0.06, right=0.97, bottom=0.07, top=0.93,
-                        wspace=0.25, hspace=0.35)
-    # 暴露给外部/测试，等价于点击按钮（headless 环境无法真的点）
-    sim.toggle = toggle
+
+def meta(sim) -> dict:
+    """连接建立时的静态描述（只发一次，不含逐帧数据）。"""
+    layers, _ = sim._venue_blob
+    return {
+        "type": "meta",
+        "profile": config.ACTIVE_PROFILE_NAME,
+        "profile_summary": disease_profiles.format_summary(config.PROFILE_INFO),
+        "population": int(sim.N),
+        "world": [float(sim.W), float(sim.H)],
+        "frames": int(CONFIG["FRAMES"]),
+        "frames_per_day": int(CONFIG["DAY_FRAMES"]),
+        "min_per_frame": float(sim.MIN_PER_FRAME),
+        "clock_start_min": float(CONFIG["CLOCK_START_MIN"]),
+        "beds": int(getattr(sim, "beds_total", 0)),
+        "medical_threshold": int(CONFIG["MEDICAL_THRESHOLD"]),
+        "seed": int(config.SEED),
+        "sample": sim.render_idx is not None,
+        "render_points": int(sim._RENDER_MAX) if sim.render_idx is not None else int(sim.N),
+        "colors": list(COLOR_MAP),
+        "status_labels": list(STATUS_LABELS),
+        "natural_history": bool(CONFIG["NATURAL_HISTORY_ENABLED"]),
+        "interventions": bool(getattr(sim, "IV_ENABLED", False)),
+        "lockdown": bool(getattr(sim, "lockdown_active", False)),
+        "venue_layers": layers,
+        "venue_size_px": [VENUE_SIZE_MIN_PX, VENUE_SIZE_MAX_PX],
+    }
+
+
+def points_blob(sim) -> bytes:
+    """当前帧的抽样点云：Float32 (n,2) 坐标 紧跟 Uint8 (n) 状态码。"""
+    if sim.render_idx is None:
+        pos = sim.pos
+        status = sim.status
+    else:
+        pos = sim.pos[sim.render_idx]
+        status = sim.status[sim.render_idx]
+    xy = pos.detach().to(torch.float32).contiguous().cpu().numpy()
+    st = status.detach().to(torch.uint8).contiguous().cpu().numpy()
+    return xy.tobytes() + st.tobytes()
+
+
+def pack_frame(sim, frame: int) -> tuple[bytes, bytes]:
+    """打包一帧：返回 (JSON 头字节, 点云字节)。``sim.last_stats`` 由 simulation F 段写入。"""
+    stats = sim.last_stats if sim.last_stats is not None else {}
+    n = int(sim.render_idx.numel()) if sim.render_idx is not None else int(sim.N)
+    header = {"type": "frame", "t": int(frame), "n": n}
+    header.update(stats)
+    blob = json.dumps(header, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return blob, points_blob(sim)

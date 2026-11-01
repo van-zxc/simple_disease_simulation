@@ -65,12 +65,12 @@ _SIM = build_simulation()
 
 
 def update(frame):
-    """推进一帧（matplotlib FuncAnimation 回调），返回需要重绘的 artists。"""
+    """推进一帧，返回本帧统计 dict（浏览器仪表盘/分析工具消费）。"""
     return simulation.update(_SIM, frame)
 
 
-def toggle(event):
-    """锁定按钮回调。"""
+def toggle(event=None):
+    """封控开关（浏览器按钮 → POST /api/toggle）；返回新的封控状态。"""
     return _SIM.toggle(event)
 
 

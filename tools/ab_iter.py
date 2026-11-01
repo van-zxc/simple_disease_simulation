@@ -71,9 +71,11 @@ def _run_child(argv: list[str]) -> dict:
     per_frame_ms = (time.perf_counter() - t0) * 1000.0 / frames
 
     # counts/title/peak 只作"两侧跑到同一帧号后状态是否同源"的参考（非逐位验收）；
-    # title 取第一行：后面几行是 7 日窗口等统计，跨版本本来就会变。
+    # title 取 stats.overlay 第一行：后面几行是 7 日窗口等统计，跨版本本来就会变。
     counts = [int(x) for x in torch.bincount(mod.status, minlength=8).cpu().tolist()]
-    title = mod.title_obj.get_text().splitlines()[0] if hasattr(mod, "title_obj") else ""
+    stats = getattr(mod, "last_stats", None) or {}
+    overlay = stats.get("overlay") or ""
+    title = overlay.splitlines()[0] if overlay else ""
     peak_mb = torch.cuda.max_memory_allocated() / 2 ** 20 if torch.cuda.is_available() else 0.0
     return {
         "per_frame_ms": per_frame_ms,

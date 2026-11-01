@@ -1,10 +1,10 @@
-"""逐帧仿真步：病程推进、传播判定与统计渲染（对外唯一入口 ``update``）。
+"""逐帧仿真步：病程推进、传播判定与统计（对外唯一入口 ``update``）。
 
 负责：一帧内的阶段编排（阶段表见 ``update`` 顶部）、病程/死亡康复、接触对传播、
-      统计聚合与 artist 更新；不负责初始状态（``state``）、日程出行（``activity``）、
+      统计聚合（产出 ``sim.last_stats``）；不负责初始状态（``state``）、日程出行（``activity``）、
       接触对枚举（``contacts``）、传染力曲线（``disease``）、v3 干预（``interventions``）、
-      绘图对象与样式（``render``）。
-对外入口：``update(sim, frame)``，返回需重绘的 artist 列表（FuncAnimation 消费）。
+      视图打包与推送（``render``/``server``）。
+对外入口：``update(sim, frame)``，返回本帧统计 dict（``sim.last_stats``，视图层消费）。
 必须保持的不变式：
   - RNG 契约：随机抽取的次数/形状/顺序由 CONFIG 开关组合决定（docs/ARCHITECTURE.md §3）；
     新增随机数必须由开关包住，关闭档案下不能多抽，否则同 seed 轨迹整体偏移。
@@ -25,7 +25,6 @@ from .interventions import (
     _process_tests,
     _resolve_traces,
 )
-from .render import COLOR_LUT
 
 # 空索引常量：主机侧整数门控判定"本帧没有该类个体"时用它占位，
 # 免去对 0 元素再做一次 nonzero，且 (0,) 的 long 索引可直接参与后续 index_select。
@@ -68,7 +67,7 @@ def update(sim, frame):
     #   C  帧首快照：symp_prev / rec_prev / incu_mask（本帧新转者不参与本帧抽签与传播）
     #   D  病程：NATURAL_HISTORY_ENABLED 走自然史分支（含 v3 检测/追踪），否则旧路径
     #   E  传播：接触对 → 稀疏概率 → 每目标至多一次感染 → 变异/免疫/计数器写回
-    #   F  统计与渲染：GPU 聚合 24 维 stat → 单次 .cpu() → 标题/曲线/散点
+    #   F  统计与视图负载：GPU 聚合 24 维 stat → 单次 .cpu() → sim.last_stats（浏览器消费）
     #   G  显存：每 50 帧检查 CUDA 缓存碎片
     # 不变式：A 段只读上一帧末写回的 counts_prev（状态在两次 update 之间不变），
     #         因此 A 段不能依赖本帧 D 段的结果；status 只在 D/E 段写。
@@ -607,7 +606,7 @@ def update(sim, frame):
                     (num_new,), device=device).clamp(min=CONFIG["INCUBATION_MIN"])
                 sim.timer[targets] = 0
 
-    # F. 统计（在 GPU 上聚合、单次拷回；渲染 artist 更新按 render_every 节流）
+    # F. 统计（在 GPU 上聚合、单次拷回；产出 sim.last_stats 供视图层打包）
     # 不变式：stat 固定 24 维，v 的下标在下面整块与标题/曲线里被复用，增删字段必须同步改解包：
     #   [0:8]  counts_g        status 0..7 计数（状态码见 MECHANISMS.md §1）
     #   [8:12] place 构成      home/work/school/leisure 中"存活且非在途"的人数
@@ -621,16 +620,8 @@ def update(sim, frame):
     #   [23]   reinf_sum       本帧再感染数
     #   末尾把 [20][21][22] 写回 sim._n_*，作为下一帧 D.5 的主机侧门控（默认 0 → 整块跳过）。
     counts_g = torch.bincount(sim.status, minlength=8)
-    if sim.render_every > 0:
-        # 抽样渲染：位置/颜色两次传输（与状态一一对应，无法并进标量批）
-        if sim.render_idx is None:
-            sim.scat.set_offsets(sim.pos.cpu().numpy())
-            sim.scat.set_facecolor(COLOR_LUT[sim.status.to(torch.uint8).cpu().numpy()])
-        else:
-            # 性能：大人口下只画固定抽样点 RENDER_MAX_POINTS 个，画面结构稳定且每帧传输量恒定
-            sim.scat.set_offsets(sim.pos[sim.render_idx].cpu().numpy())
-            sim.scat.set_facecolor(
-                COLOR_LUT[sim.status[sim.render_idx].to(torch.uint8).cpu().numpy()])
+    # 视图负载的点云不在这里打包：simulation 只产出标量统计（sim.last_stats），
+    #   抽样点云由 render.pack_frame 在推送时读取 sim.pos/sim.status 现取（纯表现层）。
 
     # 平均值/派生计数先在 GPU 上算好，和 counts 拼成一个向量一次拷回。
     # 性能：不用布尔索引取子数组（arr[mask] 内部走 aten::nonzero，每帧多次隐式同步），
@@ -776,29 +767,62 @@ def update(sim, frame):
                       f"Day {day_index + 1} {clock_hh:02d}:{clock_mm:02d} | "
                       f"home {cnt_home} work {cnt_work} school {cnt_school} "
                       f"leisure {cnt_leisure} travel {cnt_travel}")
-    sim.title_obj.set_text(title_text)
-    sim.title_obj.set_color('red' if is_collapsed else 'green')
+    # 视图负载（纯数据）：浏览器据此画地图/曲线/读数块。
+    #   不变式：这里新增/改名指标必须同时改 webui/app.js 的读数块表与 README 的界面说明。
+    iv_stats = None
+    if sim.IV_ENABLED:
+        iv_stats = {
+            "quarantined": quarantined_count,
+            "isolated": isolated_count,
+            "test_pending": sim._n_test_pending,
+            "trace_pending": sim._n_trace_pending,
+            "contact_mult": float(sim.behavior_contact_mult),
+            "tests_total": int(sim.tests_total),
+            "reported_total": int(sim.reported_total),
+        }
 
-    # 更新人口状态历史（只显示最近 500 点，render.py 把 x 轴固定为 0..500）
-    #   不变式：history 是 8 条 list（status 0..7），全历史保留，这里只切窗口给线对象
+    # 人口状态历史（数据侧保留全历史；浏览器只画最近 500 点窗口）
     for s in range(8):
         sim.history[s].append(int(counts[s]))
-        vals = sim.history[s][-500:]
-        sim.lines_pop[s].set_data(range(len(vals)), vals)
 
-    # 更新病毒进化历史（滚动 500 点窗口）
-    vals = sim.virus_history['beta'][-500:]
-    sim.line_beta.set_data(range(len(vals)), vals)
-    vals = sim.virus_history['mu'][-500:]
-    # mu 量级 0.001–0.15，×10 只为与 beta/gen 共用 0..1.6 的纵轴可读（纯显示变换）
-    sim.line_mu.set_data(range(len(vals)), [v * 10 for v in vals])
-    vals = sim.virus_history['immunity'][-500:]
-    sim.line_immunity.set_data(range(len(vals)), vals)
-    vals = sim.virus_history['gen'][-500:]
-    sim.line_gen.set_data(range(len(vals)), vals)
-
-    # 再感染率曲线（纵轴固定 0..100，不随代数轴范围裁剪）
-    sim.line_reinf.set_data(range(len(reinf_line)), reinf_line)
+    sim.last_stats = {
+        "day": day_index + 1,
+        "clock": f"{clock_hh:02d}:{clock_mm:02d}",
+        "lockdown": bool(sim.lockdown_active),
+        "counts": [int(c) for c in counts],
+        "total_infected": total_infected,
+        "symptomatic": num_symp,
+        "incubating": int(counts[2]),
+        "asymptomatic": asymptomatic,
+        "hospitalized": hospitalized,
+        "untreated": untreated_count,
+        "beds": int(sim.beds_total),
+        "collapsed": bool(is_collapsed),
+        "immune_avg": avg_immunity,
+        "reinfection_pct": recent_reinf,
+        "on_site": {
+            "home": cnt_home,
+            "work": cnt_work,
+            "school": cnt_school,
+            "leisure": cnt_leisure,
+            "travel": cnt_travel,
+        },
+        "virus": {
+            "beta": avg_beta,
+            "mu": avg_mu,
+            "generation": avg_gen,
+            "immunity": avg_immunity,
+        },
+        "series": {
+            "beta": avg_beta,
+            "mu": avg_mu,
+            "gen": avg_gen,
+            "immunity": avg_immunity,
+            "reinf": recent_reinf,
+        },
+        "interventions": iv_stats,
+        "overlay": title_text,
+    }
 
     # G. 显存管理：大规模人口下接触对临时张量形状逐帧变化，避免 CUDA 缓存碎片累积。
     #   性能：每 50 帧才检查一次（frequency 高时 empty_cache 本身有代价），
@@ -807,6 +831,6 @@ def update(sim, frame):
         if torch.cuda.memory_reserved() - torch.cuda.memory_allocated() > 2 * 2 ** 30:
             torch.cuda.empty_cache()
 
-    # 调用方契约：返回的 artist 列表供 FuncAnimation blit；顺序/数量固定为
-    #   scat + title + 8 条 population 线 + 5 条病毒/再感染线 = 15 个（总数固定为 15）
-    return [sim.scat, sim.title_obj] + sim.lines_pop + [sim.line_beta, sim.line_mu, sim.line_immunity, sim.line_gen, sim.line_reinf]
+    # 调用方契约：返回本帧统计 dict（不再是 matplotlib artist 列表）。
+    #   终端/工具读它；视图层在推送时另取点云（render.pack_frame）。
+    return sim.last_stats
